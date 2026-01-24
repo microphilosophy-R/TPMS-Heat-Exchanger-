@@ -116,7 +116,7 @@ def example_4_parametric_study():
     axes[0, 0].set_ylabel('Outlet Temperature [K]')
     axes[0, 0].set_title('Hot Outlet Temperature')
     axes[0, 0].grid(True, alpha=0.3)
-    
+
     axes[0, 1].plot(results['mh'], results['xh_out'], 'bo-', linewidth=2, markersize=8)
     axes[0, 1].set_xlabel('Mass Flow Rate [g/s]')
     axes[0, 1].set_ylabel('Para-H₂ Fraction [-]')

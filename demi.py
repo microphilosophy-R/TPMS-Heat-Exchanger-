@@ -1,8 +1,8 @@
 import numpy as np
 import time
 from scipy.optimize import fsolve
-from TPMS_heat_HE.hydrogen_properties import HydrogenProperties
-from TPMS_heat_HE.tpms_correlations import TPMSCorrelations
+from hydrogen_properties import HydrogenProperties
+from tpms_correlations import TPMSCorrelations
 
 
 # Assume HydrogenProperties and TPMSCorrelations are imported

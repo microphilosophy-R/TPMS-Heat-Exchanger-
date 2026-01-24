@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 # Import our modules
 from hydrogen_properties import HydrogenProperties, test_hydrogen_properties
 from tpms_correlations import TPMSCorrelations, test_tpms_correlations
-from tpms_heat_exchanger import TPMSHeatExchanger, create_default_config
+from tpms_heat_exchanger_NTU import TPMSHeatExchanger, create_default_config
 from tpms_visualization import TPMSVisualizer, compare_tpms_structures
 
 
@@ -48,9 +48,9 @@ def example_3_basic_heat_exchanger():
     config['tpms']['type_hot'] = 'Diamond'
     config['tpms']['type_cold'] = 'Gyroid'
     
-    # Create and solve
+    # Create and solve3
     he = TPMSHeatExchanger(config)
-    converged = he.solve(max_iter=500, tolerance=1e-3, relaxation=0.3)
+    converged = he.solve(max_iter=500, tolerance=1e-3)
     
     if converged:
         # Visualize results

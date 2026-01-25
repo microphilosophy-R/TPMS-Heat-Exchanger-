@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 # Import our modules
 from hydrogen_properties import HydrogenProperties, test_hydrogen_properties
 from tpms_correlations import TPMSCorrelations, test_tpms_correlations
-from tpms_heat_exchanger_NTU import TPMSHeatExchanger, create_default_config
+from tpms_heat_exchanger import TPMSHeatExchanger, create_default_config
 from tpms_visualization import TPMSVisualizer, compare_tpms_structures
 
 

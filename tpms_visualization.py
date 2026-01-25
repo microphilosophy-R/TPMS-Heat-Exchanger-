@@ -218,7 +218,7 @@ class TPMSVisualizer:
         
         x_eq_out = self.h2_props.get_equilibrium_fraction(self.he.Th[-1])
         x_eq_in = self.h2_props.get_equilibrium_fraction(self.he.Th[0])
-        conv_eff = (self.he.xh[-1] - self.he.xh[0]) / (x_eq_out - x_eq_in) * 100
+        conv_eff = (self.he.xh[-1]/x_eq_out) * 100
         
         # Create text summary
         summary_text = [

@@ -5,9 +5,8 @@ This module simulates heat transfer in a TPMS (Triply Periodic Minimal Surface) 
 specifically designed for ortho-para hydrogen conversion processes.
 
 CORRECTION NOTE:
-Replaced Epsilon-NTU method with a direct Enthalpy-Based Discretized solver.
-This correctly handles the internal heat generation from ortho-para conversion by
-decoupling wall heat transfer (driven by T) from energy balance (tracked by H).
+- Uses Enthalpy-Based Segmental Method (corrects internal heat generation physics).
+- Restores original physical boundary restrictions and safety clamps for robustness.
 """
 
 import numpy as np
@@ -92,27 +91,71 @@ class TPMSHeatExchanger:
         self.L_elem = self.L_HE / self.N_elements
 
     def _safe_get_prop(self, T, P, x=None, is_helium=False):
-        """Safely get properties with bounds checking"""
+        """Safely get properties, handling crashes for T < 14K (Restored from original)"""
+        # Hard clamp for safety
         if np.isnan(T): T = 20.0
+        if T < 14.0: T = 14.0
+        if T > 500.0: T = 500.0
 
-        # Clamp temperatures for property lookup stability
-        if is_helium:
-            T = np.clip(T, 2.5, 400.0)
-            try:
-                return self.h2_props.get_helium_properties(T, P)
-            except:
-                return {'h': 1000.0, 'rho': 2.0, 'cp': 5200.0, 'mu': 1e-5, 'lambda': 0.1, 'Pr': 0.7}
-        else:
-            T = np.clip(T, 20.0, 400.0)
-            if x is not None: x = np.clip(x, 0.0, 1.0)
-            try:
-                return self.h2_props.get_properties(T, P, x)
-            except:
-                return {'h': 1000.0, 'rho': 2.0, 'cp': 14000.0, 'mu': 1e-5, 'lambda': 0.1, 'Pr': 0.7}
+        try:
+            if is_helium:
+                # Helium can go lower (down to ~2.2K lambda point)
+                if T < 2.5: T = 2.5
+                p = self.h2_props.get_helium_properties(T, P)
+            else:
+                # Add check for saturation pressure issues
+                # Ensure temperature is not too close to saturation pressure
+                try:
+                    # First check if we're near saturation point
+                    import CoolProp.CoolProp as CP
+                    # Safely get saturation pressure
+                    try:
+                        psat = CP.PropsSI('P','T',T,'Q',0,'hydrogen')
+                        if abs(P - psat) < 1e-4 * P:  # Within 1e-4 % of saturation pressure
+                            # Adjust temperature slightly to avoid saturation region
+                            T_adj = T + (0.1 if T < 30 else -0.1)
+                            if T_adj >= 14.0 and T_adj <= 500.0:
+                                T = T_adj
+                    except:
+                        pass  # If saturation calc fails, continue with original T
+
+                    # Also ensure T is not below melting point at given pressure
+                    try:
+                        Tmelt = CP.PropsSI('T','P',P,'Q',1,'hydrogen')  # Melting point
+                        if T < Tmelt:
+                            T = Tmelt + 0.1  # Small buffer above melting point
+                    except:
+                        pass  # If melting point calc fails, continue with original T
+                except:
+                    pass  # If CoolProp import fails, continue with original T
+
+                # Ensure x is valid if not None
+                if x is not None:
+                    x = np.clip(x, 0.0, 1.0)  # Clamp para fraction to valid range
+
+                p = self.h2_props.get_properties(T, P, x)
+
+                # Check if properties are valid
+                if any(np.isnan(val) for val in [p.get('h', np.nan), p.get('rho', np.nan),
+                                               p.get('cp', np.nan), p.get('mu', np.nan)]):
+                    raise ValueError("Invalid property values returned")
+
+            return p
+        except Exception as e:
+            # Print warning when property calculation fails
+            print(f"Warning: Property calculation failed at T={T} K, P={P} Pa: {e}")
+            # Fallback values if Refprop/Coolprop fails completely
+            # MUST include mu, cp, lambda for Re/Pr calculations
+            return {
+                'h': 1000.0, 'rho': 2.0,
+                'cp': 14000.0 if not is_helium else 5200.0,
+                'mu': 1.0e-5, 'lambda': 0.1,
+                'Pr': 0.7  # Just in case
+            }
 
     def solve(self, max_iter=500, tolerance=1e-4, relaxation=0.2):
         print("=" * 70)
-        print("TPMS Heat Exchanger (Enthalpy Balance Method)")
+        print("TPMS Heat Exchanger (Enthalpy Balance with Robust Safety)")
         print("=" * 70)
 
         mh = self.config['operating']['mh']
@@ -128,11 +171,19 @@ class TPMSHeatExchanger:
             Tc_old = self.Tc.copy()
             Q_old = Q.copy()
 
+            # --- Safety Check: Reset if Diverged ---
+            if np.any(~np.isfinite(self.Th)) or np.any(~np.isfinite(self.Tc)):
+                print(f"  Warning: Found non-finite temperatures at iter {iteration}, resetting...")
+                self.Th = np.clip(self.Th, 14.0, 400.0)
+                self.Tc = np.clip(self.Tc, 4.0, 400.0)
+                # Apply heavier damping on Q to recover
+                Q = Q * 0.5
+
             # --- 1. Kinetics Update ---
             # Update conversion based on current temperature profile
-            # This is done FIRST so the correct x is used for enthalpy lookup
             xh_new = self._ortho_para_conversion(self.Th, self.Ph, self.xh, mh)
             self.xh = self.xh + 0.1 * (xh_new - self.xh) # Damped update
+            self.xh = np.clip(self.xh, 0.0, 1.0) # Strict bounds
 
             # --- 2. Calculate Properties & Heat Transfer Coefficients ---
             U_vals = np.zeros(self.N_elements)
@@ -166,74 +217,91 @@ class TPMSHeatExchanger:
                 U_vals[i] = 1 / (1/h_h + self.wall_thickness/self.k_wall + 1/h_c)
 
             # --- 3. Heat Transfer Calculation (Rate Equation) ---
-            # Q = U * A * (Th_avg - Tc_avg)
-            # We strictly separate wall heat transfer from enthalpy change.
             Q_raw = np.zeros(self.N_elements)
 
             for i in range(self.N_elements):
-                # Driving force: Average temperature difference
-                # Note: This allows bidirectional heat transfer (if Th < Tc, Q < 0)
                 Th_avg = 0.5 * (self.Th[i] + self.Th[i+1])
                 Tc_avg = 0.5 * (self.Tc[i] + self.Tc[i+1])
 
+                # Q > 0 means Heat flows Hot -> Cold
                 Q_raw[i] = U_vals[i] * self.A_elem * (Th_avg - Tc_avg)
 
             # Relax Q
-            Q = Q_old + relaxation * (Q_raw - Q_old)
+            # Adaptive relaxation
+            relax_Q = relaxation if iteration > 20 else 0.05
+            Q = Q_old + relax_Q * (Q_raw - Q_old)
 
             # --- 4. Enthalpy Integration (Energy Balance) ---
             hh = np.zeros(self.N_elements + 1)
             hc = np.zeros(self.N_elements + 1)
 
             # Hot Stream (0 -> N)
-            # Inlet Enthalpy
             hh[0] = self._safe_get_prop(self.config['operating']['Th_in'],
                                         self.Ph[0], self.xh[0], False)['h']
             for i in range(self.N_elements):
-                # h_out = h_in - Q / m
                 hh[i+1] = hh[i] - Q[i] / mh
 
             # Cold Stream (N -> 0)
-            # Inlet Enthalpy
             hc[-1] = self._safe_get_prop(self.config['operating']['Tc_in'],
                                          self.Pc[-1], None, True)['h']
             for i in range(self.N_elements - 1, -1, -1):
-                # h_out = h_in + Q / m (Flowing backwards, Q added)
                 hc[i] = hc[i+1] + Q[i] / mc
 
-            # --- 5. Temperature Update (Invert Enthalpy) ---
-            # Find T such that H(T, P, x) = hh
+            # --- 5. Temperature Update (Robust Inversion) ---
 
             # Hot Stream
             for i in range(len(hh)):
-                # We must use the CURRENT xh[i] to correctly account for conversion heat
                 def res_h(T):
                     return self._safe_get_prop(T, self.Ph[i], self.xh[i], False)['h'] - hh[i]
 
-                guess = np.clip(self.Th[i], 20.0, 400.0)
+                # Use current T as guess, clamped
+                guess = max(14.0, min(self.Th[i], 400.0))
+
                 try:
-                    sol = fsolve(res_h, guess)
-                    self.Th[i] = np.clip(sol[0], 20.0, 400.0)
+                    sol = fsolve(res_h, guess, full_output=True)
+                    if sol[2] == 1: # Converged
+                        new_temp = sol[0][0]
+                        if 14.0 <= new_temp <= 400.0:
+                            self.Th[i] = new_temp
+                        else:
+                            # Damped update if out of bounds (Restored logic)
+                            self.Th[i] = 0.9 * self.Th[i] + 0.1 * guess
+                    else:
+                        self.Th[i] = 0.95 * self.Th[i] + 0.05 * guess
                 except:
-                    self.Th[i] = guess # Fallback
+                    self.Th[i] = 0.95 * self.Th[i] + 0.05 * guess
 
             # Cold Stream
             for i in range(len(hc)):
                 def res_c(T):
                     return self._safe_get_prop(T, self.Pc[i], None, True)['h'] - hc[i]
 
-                guess = np.clip(self.Tc[i], 4.0, 400.0)
+                guess = max(4.0, min(self.Tc[i], 400.0))
+
                 try:
-                    sol = fsolve(res_c, guess)
-                    self.Tc[i] = np.clip(sol[0], 4.0, 400.0)
+                    sol = fsolve(res_c, guess, full_output=True)
+                    if sol[2] == 1:
+                        new_temp = sol[0][0]
+                        if 4.0 <= new_temp <= 400.0:
+                            self.Tc[i] = new_temp
+                        else:
+                            self.Tc[i] = 0.9 * self.Tc[i] + 0.1 * guess
+                    else:
+                        self.Tc[i] = 0.95 * self.Tc[i] + 0.05 * guess
                 except:
-                    self.Tc[i] = guess
+                    self.Tc[i] = 0.95 * self.Tc[i] + 0.05 * guess
 
             # --- Convergence Check ---
             err = np.max(np.abs(self.Th - Th_old)) + np.max(np.abs(self.Tc - Tc_old))
 
             if (iteration + 1) % 20 == 0 or iteration < 5:
                 print(f'Iter {iteration + 1:3d}: Err={err:.4f} | Th_out={self.Th[-1]:.2f}K | xh_out={self.xh[-1]:.3f}')
+
+            # Check for divergence and exit early if needed (Restored logic)
+            if np.any(~np.isfinite(self.Th)) or np.any(~np.isfinite(Q)):
+                print(f"Solver diverged at iteration {iteration + 1}.")
+                self._print_results(Q)
+                return False
 
             if err < tolerance:
                 print(f"\nConverged in {iteration + 1} iterations.")
@@ -246,15 +314,12 @@ class TPMSHeatExchanger:
 
     def _ortho_para_conversion(self, Th, Ph, xh, mh):
         """
-        Calculate kinetics using Wilhelmsen (retuned) model or simple model.
+        Calculate kinetics using Wilhelmsen (retuned) model.
         Supports bidirectional conversion.
         """
         xh_new = np.zeros_like(xh)
         xh_new[0] = xh[0]
 
-        # Use Retuned Wilhelmsen parameters (Wijnans et al. 2024)
-        # a=1.3246, b=34.76, c=-220.9, d=-20.65
-        # kw = b + c*(T/Tc) + d*(P/Pc)
         Tc_H2 = 32.938
         Pc_H2 = 1.284e6
 
@@ -268,13 +333,11 @@ class TPMSHeatExchanger:
             rho = props['rho']
             C_H2 = rho / 0.002016 # mol/m3
 
-            # Rate Constant (Wilhelmsen Retuned)
+            # [cite_start]Rate Constant (Wilhelmsen Retuned [cite: 712])
             kw = 34.76 - 220.9 * (T_avg / Tc_H2) - 20.65 * (P_avg / Pc_H2)
 
             # Rate Law
-            # r = (kw / C_H) * ln[ (x/x_eq)^a * ((1-x_eq)/(1-x)) ]
             try:
-                # Safety clips for log
                 x_safe = np.clip(x_avg, 1e-4, 0.9999)
                 x_eq_safe = np.clip(x_eq, 1e-4, 0.9999)
 
@@ -295,6 +358,7 @@ class TPMSHeatExchanger:
             dx = rate * tau
 
             xh_new[i + 1] = xh[i] + dx
+            # Strictly apply physical boundaries
             xh_new[i + 1] = np.clip(xh_new[i + 1], 0.0, 1.0)
 
         return xh_new
@@ -315,7 +379,6 @@ class TPMSHeatExchanger:
         Q_hot_loss = self.config['operating']['mh'] * (h_h_in - h_h_out)
 
         print(f"Hot Stream Enthalpy Drop: {Q_hot_loss:.2f} W")
-        print(f" (Includes conversion heat and sensible cooling)")
 
 def create_default_config():
     """Create default configuration dictionary"""

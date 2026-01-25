@@ -244,8 +244,15 @@ class HydrogenProperties:
                 # Mixture entropy
                 s_mix[i] = x_ortho * s_ortho + x_para[i] * s_para
                 
-                # Density: harmonic mean (better for gas mixtures)
-                rho_mix[i] = 1 / (x_ortho/rho_ortho + x_para[i]/rho_para)
+                # Density: weighted harmonic mean, avoiding division by zero
+                if x_ortho > 0 and x_para[i] > 0:
+                    rho_mix[i] = 1 / (x_ortho/rho_ortho + x_para[i]/rho_para)
+                elif x_ortho == 0:
+                    rho_mix[i] = rho_para
+                elif x_para[i] == 0:
+                    rho_mix[i] = rho_ortho
+                else:
+                    rho_mix[i] = 1 / (x_ortho/rho_ortho + x_para[i]/rho_para)  # Fallback
                 
                 # Specific heat: mass-weighted average
                 cp_mix[i] = x_ortho * cp_ortho + x_para[i] * cp_para

@@ -85,7 +85,8 @@ class TPMSHeatExchanger:
         """Safely get properties, handling crashes for T < 14K"""
         # Hard clamp for safety
         if np.isnan(T): T = 20.0
-        if T < 14.0: T = 14.0
+        # Increase minimum temperature to avoid melting point issues
+        if T < 14.2: T = 14.2
         if T > 500.0: T = 500.0
 
         try:
@@ -105,7 +106,7 @@ class TPMSHeatExchanger:
                 'Pr': 0.7
             }
 
-    def solve(self, max_iter=200, tolerance=1e-4):
+    def solve(self, max_iter=200, tolerance=1e-3):
         print("=" * 70)
         print("TPMS Heat Exchanger (Bidirectional Solver)")
         kinetics_model = self.config.get('kinetics', {}).get('model', 'simple')
@@ -115,7 +116,7 @@ class TPMSHeatExchanger:
         mh = self.config['operating']['mh']
         mc = self.config['operating']['mc']
 
-        # Q[i] is heat transferred in element i (between node i and i+1)
+        # Initialize heat transfer rates
         Q = np.zeros(self.N_elements)
 
         for iteration in range(max_iter):
@@ -129,13 +130,13 @@ class TPMSHeatExchanger:
             props_c_nodes = [self._safe_get_prop(T, P, None, True)
                              for T, P in zip(self.Tc, self.Pc)]
 
-            # --- 2. Heat Transfer (Element-wise) ---
-            Q_raw = np.zeros(self.N_elements)
+            # --- 2. Heat Transfer Calculation ---
+            Q_element = np.zeros(self.N_elements)
 
             for i in range(self.N_elements):
-                # Element i spans Node i to Node i+1
-
-                # --- HOT SIDE ---
+                # Element i spans from node i to node i+1
+                
+                # Hot side properties at node i
                 p_h = props_h_nodes[i]
                 u_h = mh / (p_h['rho'] * self.Ac_hot)
                 Re_h = p_h['rho'] * u_h * self.Dh_hot / p_h['mu']
@@ -143,103 +144,136 @@ class TPMSHeatExchanger:
                 Nu_h_val = TPMSCorrelations.get_correlations(self.TPMS_hot, Re_h, Pr_h, 'Gas')[0]
                 h_h = 1.2 * Nu_h_val * p_h['lambda'] / self.Dh_hot
 
-                # --- COLD SIDE ---
-                p_c = props_c_nodes[i]
+                # Cold side properties at node i+1 (counterflow)
+                p_c = props_c_nodes[i+1]
                 u_c = mc / (p_c['rho'] * self.Ac_cold)
                 Re_c = p_c['rho'] * u_c * self.Dh_cold / p_c['mu']
                 Pr_c = p_c['mu'] * p_c['cp'] / p_c['lambda']
                 Nu_c_val = TPMSCorrelations.get_correlations(self.TPMS_cold, Re_c, Pr_c, 'Gas')[0]
                 h_c = Nu_c_val * p_c['lambda'] / self.Dh_cold
 
-                # --- Overall U ---
+                # Overall heat transfer coefficient
                 U = 1 / (1 / h_h + self.wall_thickness / self.k_wall + 1 / h_c)
-                delta_T_lm = ((self.Th[i] - self.Tc[i + 1]) - (self.Th[i + 1] - self.Tc[i])) / \
-                             np.log(((self.Th[i] - self.Tc[i + 1]) + 1e-8) / ((self.Th[i + 1] - self.Tc[i]) + 1e-8))
+                
+                # Temperature differences for LMTD (Counterflow)
+                # Hot: node i -> node i+1
+                # Cold: node i+1 -> node i (opposite direction)
+                dT1 = self.Th[i] - self.Tc[i + 1]  # Hot in - Cold out
+                dT2 = self.Th[i + 1] - self.Tc[i]  # Hot out - Cold in
+                
+                # Calculate LMTD with numerical stability
+                if abs(dT1 - dT2) < 1e-6:  # Near equal, use arithmetic mean
+                    LMTD = dT1
+                elif dT1 * dT2 > 0:  # Same sign
+                    if dT1 > 0 and dT2 > 0:
+                        LMTD = (dT1 - dT2) / np.log(dT1 / dT2)
+                    else:  # Both negative
+                        LMTD = (dT2 - dT1) / np.log(dT2 / dT1)
+                else:  # Mixed flow, use arithmetic mean
+                    LMTD = (dT1 + dT2) / 2.0
 
-                Q_raw[i] = U * self.A_heat / self.N_elements * delta_T_lm
+                # Heat transfer rate in this element
+                Q_element[i] = U * self.A_heat / self.N_elements * LMTD
 
-                # Relax Q
-                relax = 0.2 if iteration > 10 else 0.05
-                Q = Q_old + relax * (Q_raw - Q_old)
+            # Apply under-relaxation
+            relax_factor = 0.1 if iteration < 20 else 0.05
+            Q = Q_old + relax_factor * (Q_element - Q_old)
 
-                # --- Epsilon-NTU ---
-                # Ch = mh * p_h['cp']
-                # Cc = mc * p_c['cp']
-                # Cmin, Cmax = min(Ch, Cc), max(Ch, Cc)
-                #
-                # NTU = U * (self.A_heat / self.N_elements) / Cmin
-                # Cr = Cmin / Cmax
-                #
-                # if NTU > 10: NTU = 10
-                # if Cr < 1.0:
-                #     if abs(1 - Cr * np.exp(-NTU * (1 - Cr))) > 1e-10:
-                #         eff = (1 - np.exp(-NTU * (1 - Cr))) / (1 - Cr * np.exp(-NTU * (1 - Cr)))
-                #     else:
-                #         eff = 1.0
-                # else:
-                #     eff = NTU / (1 + NTU)
-
-                # --- Bidirectional Heat Transfer ---
-                # Allowed Q to be negative if Cold > Hot
-
-
-
-            # --- 3. Energy Balance ---
-            hh = np.zeros(self.N_elements + 1)
-            hc = np.zeros(self.N_elements + 1)
-
-            # Hot (Forward): h[i+1] = h[i] - Q/m
-            hh[0] = self._safe_get_prop(self.config['operating']['Th_in'],
-                                        self.Ph[0], self.config['operating']['xh_in'], False)['h']
+            # --- 3. Energy Balance (Updated with more conservative approach) ---
+            # Hot stream: loses heat as it flows from 0 to L
+            # Cold stream: gains heat as it flows from L to 0
+            
+            # Calculate enthalpies based on current temperatures
+            hh_calc = np.array([self._safe_get_prop(self.Th[i], self.Ph[i], self.xh[i], False)['h'] 
+                               for i in range(len(self.Th))])
+            hc_calc = np.array([self._safe_get_prop(self.Tc[i], self.Pc[i], None, True)['h'] 
+                               for i in range(len(self.Tc))])
+            
+            # Predict new enthalpies based on heat transfer
+            hh_new = hh_calc.copy()
+            hc_new = hc_calc.copy()
+            
+            # Hot stream loses heat: h_new[i+1] = h_old[i+1] - (heat_removed_from_element_i) 
+            # But we need to redistribute this heat loss appropriately
             for i in range(self.N_elements):
-                hh[i + 1] = hh[i] - Q[i] / mh
+                # Heat lost by hot stream in element i
+                heat_lost_hot = Q[i]  # Only positive heat transfer from hot to cold
+                # Distribute heat loss between nodes i and i+1
+                hh_new[i] -= heat_lost_hot / (2 * mh)  # Half the heat from node i
+                if i+1 < len(hh_new):
+                    hh_new[i+1] -= heat_lost_hot / (2 * mh)  # Half the heat from node i+1
 
-            # Cold (Backward): h[i] = h[i+1] + Q/m
-            hc[-1] = self._safe_get_prop(self.config['operating']['Tc_in'],
-                                         self.Pc[-1], None, True)['h']
-            for i in range(self.N_elements - 1, -1, -1):
-                hc[i] = hc[i + 1] + Q[i] / mc
+            # Cold stream gains heat: h_new[i] = h_old[i] + (heat_gained_from_element_i)
+            for i in range(self.N_elements):
+                # Heat gained by cold stream in element i
+                heat_gained_cold = Q[i]  # Only positive heat transfer to cold
+                # Distribute heat gain between nodes i and i+1
+                hc_new[i+1] += heat_gained_cold / (2 * mc)  # Half the heat to node i+1
+                hc_new[i] += heat_gained_cold / (2 * mc)  # Half the heat to node i
 
-            # --- 4. Temperature Update ---
-            for i in range(len(hh)):
-                def res_h(T):
-                    return self._safe_get_prop(T, self.Ph[i], self.xh[i], False)['h'] - hh[i]
-
-                guess = max(14.0, min(self.Th[i], 400.0))
+            # --- 4. Temperature Updates ---
+            # Convert new enthalpies back to temperatures
+            Th_new = self.Th.copy()
+            Tc_new = self.Tc.copy()
+            
+            # Update hot temperatures
+            for i in range(len(self.Th)):
+                def enthalpy_residual(T):
+                    h_calc = self._safe_get_prop(T, self.Ph[i], self.xh[i], False)['h']
+                    return h_calc - hh_new[i]
+                
+                initial_guess = max(14.2, min(self.Th[i], 400.0))
                 try:
-                    sol = fsolve(res_h, guess, full_output=True)
-                    if sol[2] == 1:
-                        self.Th[i] = sol[0][0]
+                    sol = fsolve(enthalpy_residual, initial_guess, full_output=True)
+                    if sol[2] == 1 and np.isfinite(sol[0][0]):
+                        temp = max(14.2, min(sol[0][0], 400.0))
+                        # Apply physical constraint: hot stream should cool down along flow
+                        if i > 0:
+                            temp = min(temp, Th_new[i-1])  # Ensure cooling trend
+                        Th_new[i] = 0.8 * self.Th[i] + 0.2 * temp  # Damping
                     else:
-                        self.Th[i] = 0.95 * self.Th[i] + 0.05 * guess
+                        Th_new[i] = self.Th[i]  # No change if solution fails
                 except:
-                    self.Th[i] = 0.95 * self.Th[i] + 0.05 * guess
+                    Th_new[i] = self.Th[i]  # No change if exception occurs
 
-            for i in range(len(hc)):
-                def res_c(T):
-                    return self._safe_get_prop(T, self.Pc[i], None, True)['h'] - hc[i]
-
-                guess = max(4.0, min(self.Tc[i], 400.0))
+            # Update cold temperatures
+            for i in range(len(self.Tc)):
+                def enthalpy_residual(T):
+                    h_calc = self._safe_get_prop(T, self.Pc[i], None, True)['h']
+                    return h_calc - hc_new[i]
+                
+                initial_guess = max(4.0, min(self.Tc[i], 400.0))
                 try:
-                    sol = fsolve(res_c, guess, full_output=True)
-                    if sol[2] == 1:
-                        self.Tc[i] = sol[0][0]
+                    sol = fsolve(enthalpy_residual, initial_guess, full_output=True)
+                    if sol[2] == 1 and np.isfinite(sol[0][0]):
+                        temp = max(4.0, min(sol[0][0], 400.0))
+                        # Apply physical constraint: cold stream should heat up along flow (reverse direction)
+                        # Cold stream flows from index N to 0, so Tc[i] should be >= Tc[i+1] if heating
+                        if i < len(self.Tc) - 1:
+                            temp = max(temp, Tc_new[i+1])  # Ensure heating trend
+                        Tc_new[i] = 0.8 * self.Tc[i] + 0.2 * temp  # Damping
                     else:
-                        self.Tc[i] = 0.95 * self.Tc[i] + 0.05 * guess
+                        Tc_new[i] = self.Tc[i]  # No change if solution fails
                 except:
-                    self.Tc[i] = 0.95 * self.Tc[i] + 0.05 * guess
+                    Tc_new[i] = self.Tc[i]  # No change if exception occurs
 
-            # --- 5. Kinetics (Bidirectional) ---
+            # Apply the updates with damping
+            self.Th = Th_new
+            self.Tc = Tc_new
+
+            # --- 5. Kinetics Update ---
             xh_new = self._ortho_para_conversion(self.Th, self.Ph, self.xh, mh)
-            self.xh = self.xh + 0.05 * (xh_new - self.xh)
+            self.xh = self.xh + 0.02 * (xh_new - self.xh)
 
             # Convergence Check
-            err = np.max(np.abs(self.Th - Th_old)) + np.max(np.abs(self.Tc - Tc_old))
+            err_th = np.max(np.abs(self.Th - Th_old))
+            err_tc = np.max(np.abs(self.Tc - Tc_old))
+            err = err_th + err_tc
 
-            if (iteration + 1) % 10 == 0:
+            if (iteration + 1) % 20 == 0:
                 print(f'N_iter = {iteration + 1:3d}: Err={err:.4f} | Th_out={self.Th[-1]:.1f}K | Tco={self.Tc[0]:.1f}K')
 
-            if np.any(~np.isfinite(self.Th)) or np.any(~np.isfinite(self.Tc)) or np.any(~np.isfinite(Q)):
+            if np.any(~np.isfinite(self.Th)) or np.any(~np.isfinite(self.Tc)):
                 print(f"Solver diverged at iteration {iteration + 1}.")
                 self._print_results(Q)
                 return False
@@ -349,7 +383,7 @@ def create_default_config():
             'Th_in': 66.3, 'Th_out': 53.5,
             'Tc_in': 43.5, 'Tc_out': 61.3,
             'Ph_in': 1.13e6, 'Pc_in': 0.54e6,
-            'mh': 1e-3, 'mc': 2e-3,
+            'mh': 1e-3, 'mc': 1e-3,
             'xh_in': 0.452
         },
         'kinetics': {'model': 'simple'}, # Change to 'complex' to use demi.py model

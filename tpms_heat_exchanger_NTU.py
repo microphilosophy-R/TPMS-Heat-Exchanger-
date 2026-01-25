@@ -3,6 +3,7 @@ TPMS Heat Exchanger for Ortho-Para Hydrogen Conversion
 
 Main solver for catalyst-filled TPMS heat exchangers in hydrogen liquefaction.
 Couples heat transfer, fluid flow, and ortho-para conversion kinetics.
+Integrates both simple first-order and complex experimental kinetics.
 
 Author: Based on research by Zhang et al. (2025)
 """
@@ -10,13 +11,10 @@ Author: Based on research by Zhang et al. (2025)
 import numpy as np
 import time
 from scipy.optimize import fsolve
+import warnings
 
 from hydrogen_properties import HydrogenProperties
 from tpms_correlations import TPMSCorrelations
-import numpy as np
-import time
-from scipy.optimize import fsolve
-import warnings
 
 # Suppress the specific Re range warnings to clean up output
 warnings.filterwarnings("ignore", message="Some Re values outside validated range")
@@ -110,7 +108,9 @@ class TPMSHeatExchanger:
 
     def solve(self, max_iter=200, tolerance=1e-4):
         print("=" * 70)
-        print("TPMS Heat Exchanger (Corrected Spatial Solver)")
+        print("TPMS Heat Exchanger Solver")
+        kinetics_model = self.config.get('kinetics', {}).get('model', 'simple')
+        print(f"Kinetics Model: {kinetics_model.upper()}")
         print("=" * 70)
 
         mh = self.config['operating']['mh']
@@ -179,24 +179,17 @@ class TPMSHeatExchanger:
                 # Effectiveness
                 if NTU > 10: NTU = 10  # Cap for stability
                 if Cr < 1.0:
-                    if abs(1 - Cr * np.exp(-NTU * (1 - Cr))) > 1e-10:  # 避免除零
+                    if abs(1 - Cr * np.exp(-NTU * (1 - Cr))) > 1e-10:
                         eff = (1 - np.exp(-NTU * (1 - Cr))) / (1 - Cr * np.exp(-NTU * (1 - Cr)))
                     else:
-                        eff = 1.0  # 安全值
+                        eff = 1.0
                 else:
                     eff = NTU / (1 + NTU)
 
-                # Calculate the heat transfer rate
-                # to ensure that heat is transferred from the high-temperature fluid to the low-temperature fluid.
+                # Calculate Heat Transfer Rate
+                # Allow reverse heat transfer if Cold > Hot
                 temp_diff = Th_in_loc - Tc_in_loc
-                if temp_diff >= 0:
-                    # The hot fluid is at a higher temperature than the cold fluid,
-                    # resulting in normal heat transfer
-                    Q_raw[i] = eff * Cmin * temp_diff
-                else:
-                    # The cold fluid has a higher temperature, so theoretically, heat transfer should not occur,
-                    # or the direction of heat transfer should be reversed.
-                    Q_raw[i] = 0  # Alternatively, allowing reverse heat transfer could be considered.
+                Q_raw[i] = eff * Cmin * temp_diff
 
             # Relax Q
             relax = 0.2 if iteration > 10 else 0.05
@@ -210,14 +203,14 @@ class TPMSHeatExchanger:
             hh[0] = self._safe_get_prop(self.config['operating']['Th_in'],
                                         self.Ph[0], self.config['operating']['xh_in'], False)['h']
             for i in range(self.N_elements):
-                # 热流体释放热量，所以焓值减少
+                # Hot fluid loses heat Q[i]
                 hh[i + 1] = hh[i] - Q[i] / mh
 
             # Cold: Backward (N -> 0)
             hc[-1] = self._safe_get_prop(self.config['operating']['Tc_in'],
                                          self.Pc[-1], None, True)['h']
             for i in range(self.N_elements - 1, -1, -1):
-                # 冷流体吸收热量，所以焓值增加
+                # Cold fluid gains heat Q[i]
                 hc[i] = hc[i + 1] + Q[i] / mc
 
             # --- 4. Temperature Update (Inverse Lookup) ---
@@ -226,20 +219,16 @@ class TPMSHeatExchanger:
                 def res_h(T):
                     return self._safe_get_prop(T, self.Ph[i], self.xh[i], False)['h'] - hh[i]
 
-                # Clamp guess
                 guess = max(14.0, min(self.Th[i], 400.0))
                 try:
                     sol = fsolve(res_h, guess, full_output=True)
-                    if sol[2] == 1:  # 解收敛
+                    if sol[2] == 1:
                         new_temp = sol[0][0]
-                        # Validation
                         if 14.0 <= new_temp <= 400.0:
                             self.Th[i] = new_temp
                         else:
-                            # If the solution is unreasonable, use damped updates.
                             self.Th[i] = 0.9 * self.Th[i] + 0.1 * guess
                     else:
-                        # fsolve failed, use damping
                         self.Th[i] = 0.95 * self.Th[i] + 0.05 * guess
                 except:
                     self.Th[i] = 0.95 * self.Th[i] + 0.05 * guess
@@ -252,23 +241,20 @@ class TPMSHeatExchanger:
                 guess = max(4.0, min(self.Tc[i], 400.0))
                 try:
                     sol = fsolve(res_c, guess, full_output=True)
-                    if sol[2] == 1:  # 解收敛
+                    if sol[2] == 1:
                         new_temp = sol[0][0]
-                        # 验证解的合理性
                         if 4.0 <= new_temp <= 400.0:
                             self.Tc[i] = new_temp
                         else:
-                            # 如果解不合理，使用阻尼更新
                             self.Tc[i] = 0.9 * self.Tc[i] + 0.1 * guess
                     else:
-                        # 如果fsolve失败，使用阻尼更新
                         self.Tc[i] = 0.95 * self.Tc[i] + 0.05 * guess
                 except:
                     self.Tc[i] = 0.95 * self.Tc[i] + 0.05 * guess
 
-            # --- 5. Kinetics ---
-            # Damped update
+            # --- 5. Kinetics (Bidirectional) ---
             xh_new = self._ortho_para_conversion(self.Th, self.Ph, self.xh, mh)
+            # Damped update for stability
             self.xh = self.xh + 0.05 * (xh_new - self.xh)
 
             # Convergence
@@ -276,13 +262,11 @@ class TPMSHeatExchanger:
 
             if (iteration + 1) % 10 == 0:
                 print(f'N_iter = {iteration + 1:3d}: Err={err:.4f} | Th_out={self.Th[-1]:.1f}K | Tco={self.Tc[0]:.1f}K')
-                # print error
                 if np.any(~np.isfinite(self.Th)) or np.any(~np.isfinite(self.Tc)):
                     print("  Warning: Found non-finite temperatures, resetting...")
                     self.Th = np.clip(self.Th, 14.0, 400.0)
                     self.Tc = np.clip(self.Tc, 4.0, 400.0)
 
-            # Check for outliers, and if any are found, terminate the process prematurely.
             if np.any(~np.isfinite(self.Th)) or np.any(~np.isfinite(self.Tc)) or np.any(~np.isfinite(Q)):
                 print(f"Solver diverged at iteration {iteration + 1}. Terminating.")
                 self._print_results(Q)
@@ -298,38 +282,105 @@ class TPMSHeatExchanger:
         return False
 
     def _ortho_para_conversion(self, Th, Ph, xh, mh):
-        # Spatially aligned 0->N integration
+        """
+        Calculate ortho-para conversion using the Wilhelmsen et al. kinetic model
+        with 'Retuned' parameters from Wijnans et al. (2024).
+
+        This model is bidirectional, allowing both forward (ortho->para) and
+        reverse (para->ortho) conversion based on local thermodynamic equilibrium.
+
+        Model:
+            dx/dt = (kw / C_H) * ln[ (x/x_eq)^a * ((1-x_eq)/(1-x)) ]
+
+            Where kw = b + c*(T/Tc) + d*(P/Pc)
+
+        Parameters from Wijnans et al. (2024), Table 3 (Retuned):
+            a = 1.3246 [-]
+            b = 34.76 [mol/m3/s]
+            c = -220.9 [mol/m3/s]
+            d = -20.65 [mol/m3/s]
+        """
+        # Critical properties of Hydrogen
+        Tc_H2 = 32.938  # K
+        Pc_H2 = 1.284e6  # Pa (approx 12.8 bar)
+        M_H2 = 2.016e-3  # kg/mol
+
+        # "Retuned" parameters from Wijnans et al. (2024) Table 3
+        param_a = 1.3246
+        param_b = 34.76
+        param_c = -220.9
+        param_d = -20.65
+
         xh_new = np.zeros_like(xh)
         xh_new[0] = xh[0]
 
         for i in range(self.N_elements):
+            # Average conditions in the element
             T_avg = 0.5 * (Th[i] + Th[i + 1])
-            x_avg = 0.5 * (xh[i] + xh[i + 1])  # Use old value for rate calc
+            P_avg = 0.5 * (Ph[i] + Ph[i + 1])
+            x_avg = 0.5 * (xh[i] + xh[i + 1])  # Use implicit avg for stability
 
+            # 1. Calculate Equilibrium Fraction
             x_eq = self.h2_props.get_equilibrium_fraction(T_avg)
 
-            # Reaction Rate
-            if x_avg < x_eq:
-                # Approximate first order
-                k = 0.05  # Base rate, replace with full kinetics if stable
-                # Calculate real rate here if needed, but ensure it doesn't return NaN
+            # 2. Get Fluid Properties (Density)
+            # Use safe property lookup
+            try:
+                props = self._safe_get_prop(T_avg, P_avg, x_avg, False)
+                rho = props['rho']
+            except:
+                rho = 2.0  # Fallback density
 
-                rho = self._safe_get_prop(T_avg, Ph[i], x_avg, False)['rho']
-                u = mh / (rho * self.Ac_hot)
-                tau = self.L_elem / u
+            # Molar concentration C_H [mol/m^3]
+            C_H = rho / M_H2
 
-                # Simple exponential approach to equilibrium
-                # x_new = x_eq - (x_eq - x_old) * exp(-k * tau)
-                # But using your kinetic model:
-                # rate = k * (x_eq - x)
-                dx = 0.1 * (x_eq - x_avg) * tau  # Damped rate placeholder
-                xh_new[i + 1] = xh_new[i] + dx
-            else:
-                xh_new[i + 1] = xh_new[i]
+            # 3. Calculate Reaction Rate Constant (kw)
+            # kw = b + c*(T/Tc) + d*(P/Pc)
+            # Note: kw typically becomes negative in the gas phase with these parameters,
+            # which correctly offsets the sign of the log term for x < x_eq.
+            kw = param_b + param_c * (T_avg / Tc_H2) + param_d * (P_avg / Pc_H2)
 
-            xh_new[i + 1] = np.clip(xh_new[i + 1], 0, 1)
+            # 4. Calculate Kinetic Rate Term (Langmuir-Hinshelwood form)
+            # Term = ln[ (x/x_eq)^a * ((1-x_eq)/(1-x)) ]
+
+            # Safety checks for log domain
+            x_safe = np.clip(x_avg, 1e-4, 0.9999)
+            x_eq_safe = np.clip(x_eq, 1e-4, 0.9999)
+
+            try:
+                term1 = (x_safe / x_eq_safe) ** param_a
+                term2 = (1.0 - x_eq_safe) / (1.0 - x_safe)
+
+                log_arg = term1 * term2
+
+                if log_arg <= 0:
+                    rate = 0.0
+                else:
+                    # Rate law: dx/dt = (kw / C_H) * ln(...)
+                    # This naturally handles direction:
+                    # If x < x_eq (Ortho->Para): log_arg < 1 -> ln < 0.
+                    #    Since kw is typically negative at T>20K, Rate > 0 (Forward).
+                    # If x > x_eq (Para->Ortho): log_arg > 1 -> ln > 0.
+                    #    Since kw is negative, Rate < 0 (Reverse).
+                    rate = (kw / C_H) * np.log(log_arg)
+
+            except Exception:
+                rate = 0.0
+
+            # 5. Integration (Spatial)
+            # dx = rate * residence_time
+            # u = mass_flux / (rho * Area)
+            u = mh / (rho * self.Ac_hot)
+            tau = self.L_elem / u
+
+            # Update composition
+            dx = rate * tau
+            xh_new[i + 1] = xh[i] + dx
+
+            # Physical clamping [0, 1]
+            xh_new[i + 1] = np.clip(xh_new[i + 1], 0.0, 1.0)
+
         return xh_new
-
     def _print_results(self, Q):
         print("=" * 70)
         print("RESULTS")
@@ -338,9 +389,8 @@ class TPMSHeatExchanger:
         print(f"Hot Outlet (x=L): {self.Th[-1]:.2f} K")
         print(f"Cold Inlet (x=L): {self.Tc[-1]:.2f} K")
         print(f"Cold Outlet (x=0): {self.Tc[0]:.2f} K")
-        
-        # 避免NaN值的计算
-        valid_Q = Q[np.isfinite(Q)]  # 过滤掉NaN和无穷大值
+
+        valid_Q = Q[np.isfinite(Q)]
         if len(valid_Q) > 0:
             total_heat = np.sum(valid_Q)
             print(f"Total Heat: {total_heat:.2f} W")
@@ -379,6 +429,9 @@ def create_default_config():
             'mc': 2e-3,         # kg/s
             'xh_in': 0.452      # Initial para fraction
         },
+        'kinetics': {
+            'model': 'simple'   # Options: 'simple', 'complex'
+        },
         'catalyst': {
             'enhancement': 1.2,
             'pressure_factor': 1.3
@@ -395,5 +448,9 @@ def create_default_config():
 if __name__ == "__main__":
     # Create and run heat exchanger
     config = create_default_config()
+
+    # You can switch between models here
+    config['kinetics']['model'] = 'simple'
+
     he = TPMSHeatExchanger(config)
     he.solve()

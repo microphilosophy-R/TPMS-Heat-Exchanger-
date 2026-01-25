@@ -150,21 +150,19 @@ class TPMSVisualizer:
     
     def _plot_heat_transfer(self, ax, x_elem):
         """Plot element-wise heat transfer"""
-        props_h = self.he._calculate_hot_properties()
-        props_c = self.he._calculate_cold_properties()
-        _, Q = self.he._calculate_heat_transfer(props_h, props_c)
+        # Calculate heat transfer data directly
+        U, Q = self._calculate_heat_transfer_data()
         
         ax.bar(x_elem, Q, width=1/len(Q), color=self.colors['conversion'], alpha=0.7)
         ax.set_xlabel('Normalized Position [-]')
         ax.set_ylabel('Heat Transfer Rate [W]')
         ax.set_title('Element-wise Heat Transfer')
-        ax.grid(True, alpha=0.3, axis='y')
+        ax.grid(True, alpha=0.3)
     
     def _plot_U_coefficient(self, ax, x_elem):
         """Plot overall heat transfer coefficient"""
-        props_h = self.he._calculate_hot_properties()
-        props_c = self.he._calculate_cold_properties()
-        U, _ = self.he._calculate_heat_transfer(props_h, props_c)
+        # Calculate heat transfer data directly
+        U, Q = self._calculate_heat_transfer_data()
         
         ax.plot(x_elem, U, color=self.colors['conversion'], linewidth=2)
         ax.set_xlabel('Normalized Position [-]')
@@ -174,8 +172,9 @@ class TPMSVisualizer:
     
     def _plot_nusselt(self, ax, x_pos):
         """Plot Nusselt numbers"""
-        props_h = self.he._calculate_hot_properties()
-        props_c = self.he._calculate_cold_properties()
+        # Calculate properties for both streams
+        props_h = self._calculate_stream_properties(is_hot=True)
+        props_c = self._calculate_stream_properties(is_hot=False)
         
         ax.plot(x_pos, props_h['Nu'], color=self.colors['hot'], 
                linewidth=2, label=f'Hot ({self.he.TPMS_hot})')
@@ -189,8 +188,9 @@ class TPMSVisualizer:
     
     def _plot_friction(self, ax, x_elem):
         """Plot friction factors"""
-        props_h = self.he._calculate_hot_properties()
-        props_c = self.he._calculate_cold_properties()
+        # Calculate properties for both streams
+        props_h = self._calculate_stream_properties(is_hot=True)
+        props_c = self._calculate_stream_properties(is_hot=False)
         
         ax.plot(x_elem, props_h['f'][:-1], color=self.colors['hot'], 
                linewidth=2, label=f'Hot ({self.he.TPMS_hot})')
@@ -207,9 +207,8 @@ class TPMSVisualizer:
         ax.axis('off')
         
         # Calculate metrics
-        props_h = self.he._calculate_hot_properties()
-        props_c = self.he._calculate_cold_properties()
-        U, Q = self.he._calculate_heat_transfer(props_h, props_c)
+        # Calculate heat transfer data directly
+        U, Q = self._calculate_heat_transfer_data()
         
         Q_total = np.sum(Q)
         dP_hot = self.he.Ph[0] - self.he.Ph[-1]
@@ -223,26 +222,26 @@ class TPMSVisualizer:
         
         # Create text summary
         summary_text = [
-            r'$\bf{TPMS\ Heat\ Exchanger\ Summary}$',
+            'TPMS Heat Exchanger Summary',
             '',
-            r'$\bf{Structure:}$',
+            'Structure:',
             f'Hot side: {self.he.TPMS_hot}',
             f'Cold side: {self.he.TPMS_cold}',
             '',
-            r'$\bf{Thermal\ Performance:}$',
+            'Thermal Performance:',
             f'Total heat: {Q_total:.2f} W',
-            f'Hot ΔT: {dT_hot:.2f} K',
-            f'Cold ΔT: {dT_cold:.2f} K',
-            f'Avg U: {np.mean(U):.2f} W/(m²·K)',
+            f'Hot Delta T: {dT_hot:.2f} K',
+            f'Cold Delta T: {dT_cold:.2f} K',
+            f'Avg U: {np.mean(U):.2f} W/(m2*K)',
             '',
-            r'$\bf{Flow\ Performance:}$',
-            f'Hot ΔP: {dP_hot/1e3:.2f} kPa',
-            f'Cold ΔP: {dP_cold/1e3:.2f} kPa',
+            'Flow Performance:',
+            f'Hot Delta P: {dP_hot/1e3:.2f} kPa',
+            f'Cold Delta P: {dP_cold/1e3:.2f} kPa',
             '',
-            r'$\bf{Conversion:}$',
+            'Conversion:',
             f'Efficiency: {conv_eff:.2f}%',
-            f'$x_{{in}}$: {self.he.xh[0]:.4f}',
-            f'$x_{{out}}$: {self.he.xh[-1]:.4f}'
+            f'xin: {self.he.xh[0]:.4f}',
+            f'xout: {self.he.xh[-1]:.4f}'
         ]
         
         ax.text(0.1, 0.95, '\n'.join(summary_text), 
@@ -261,8 +260,9 @@ class TPMSVisualizer:
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
         fig.suptitle('TPMS Performance Metrics Analysis', fontsize=16, fontweight='bold')
         
-        props_h = self.he._calculate_hot_properties()
-        props_c = self.he._calculate_cold_properties()
+        # Calculate properties for both streams
+        props_h = self._calculate_stream_properties(is_hot=True)
+        props_c = self._calculate_stream_properties(is_hot=False)
         
         # Temperature-Nusselt relationship
         ax = axes[0, 0]
@@ -320,7 +320,8 @@ class TPMSVisualizer:
         
         # Thermal effectiveness
         ax = axes[1, 1]
-        U, Q = self.he._calculate_heat_transfer(props_h, props_c)
+        # Calculate heat transfer data directly
+        U, Q = self._calculate_heat_transfer_data()
         Q_total = np.sum(Q)
         mh = self.he.config['operating']['mh']
         mc = self.he.config['operating']['mc']
@@ -356,6 +357,131 @@ class TPMSVisualizer:
             print(f"Figure saved to {save_path}")
         
         plt.show()
+    
+    def _calculate_stream_properties(self, is_hot=True):
+        """
+        Helper method to calculate properties for hot or cold stream
+        """
+        if is_hot:
+            # Hot stream properties
+            T = self.he.Th  # Temperature array
+            P = self.he.Ph  # Pressure array
+            x = self.he.xh  # Para-hydrogen fraction
+            m_dot = self.he.config['operating']['mh']  # Mass flow rate
+            Ac = self.he.Ac_hot  # Cross-sectional area
+            Dh = self.he.Dh_hot  # Hydraulic diameter
+            tpms_type = self.he.TPMS_hot  # TPMS type
+            is_helium = False  # Not helium for hot stream
+        else:
+            # Cold stream properties
+            T = self.he.Tc  # Temperature array
+            P = self.he.Pc  # Pressure array
+            x = None  # No para-hydrogen fraction for cold (helium)
+            m_dot = self.he.config['operating']['mc']  # Mass flow rate
+            Ac = self.he.Ac_cold  # Cross-sectional area
+            Dh = self.he.Dh_cold  # Hydraulic diameter
+            tpms_type = self.he.TPMS_cold  # TPMS type
+            is_helium = True  # Is helium for cold stream
+        
+        # Calculate properties using the same logic as in the heat exchanger
+        N = len(T)
+        props = {'h': np.zeros(N), 'rho': np.zeros(N), 'h_coeff': np.zeros(N), 
+                 'Nu': np.zeros(N), 'f': np.zeros(N), 'Re': np.zeros(N)}
+        
+        for i in range(N):
+            if is_helium:
+                p = self.h2_props.get_helium_properties(T[i], P[i])
+            else:
+                p = self.h2_props.get_properties(T[i], P[i], x[i] if x is not None else 0.5)
+
+            props['h'][i] = p['h']
+            props['rho'][i] = p['rho']
+
+            # Flow properties
+            u = m_dot / (p['rho'] * Ac)
+            Re = p['rho'] * u * Dh / p['mu']
+            Pr = p['mu'] * p['cp'] / p['lambda']
+
+            props['Re'][i] = Re
+            
+            # Get correlations from TPMSCorrelations
+            from tpms_correlations import TPMSCorrelations
+            Nu, f = TPMSCorrelations.get_correlations(tpms_type, Re, Pr, 'Gas')
+            
+            # Handle case where correlations might return None or invalid values
+            if np.isnan(Nu) or Nu is None:
+                Nu = 10.0
+            if np.isnan(f) or f is None:
+                f = 0.01
+                
+            props['Nu'][i] = Nu
+            props['f'][i] = f
+
+            # Catalyst enhancement (Hot side only)
+            catalyst_factor = 1.2 if not is_helium else 1.0
+            props['h_coeff'][i] = catalyst_factor * Nu * p['lambda'] / Dh
+
+        return props
+    
+    def _calculate_heat_transfer_data(self):
+        """
+        Recalculate heat transfer data based on available temperature data
+        """
+        N = self.he.N_elements
+        U = np.zeros(N)
+        Q = np.zeros(N)
+        
+        # Calculate properties for both streams
+        props_h = self._calculate_stream_properties(is_hot=True)
+        props_c = self._calculate_stream_properties(is_hot=False)
+
+        for i in range(N):
+            # Element i spans Node i to Node i+1
+
+            # HOT SIDE CORRELATIONS
+            p_h = self.h2_props.get_properties(self.he.Th[i], self.he.Ph[i], self.he.xh[i])
+            # Calculate flow properties explicitly
+            mh = self.he.config['operating']['mh']
+            u_h = mh / (p_h['rho'] * self.he.Ac_hot)
+            Re_h = p_h['rho'] * u_h * self.he.Dh_hot / p_h['mu']
+            Pr_h = p_h['mu'] * p_h['cp'] / p_h['lambda']
+
+            from tpms_correlations import TPMSCorrelations
+            Nu_h_val, f_h_val = TPMSCorrelations.get_correlations(self.he.TPMS_hot, Re_h, Pr_h, 'Gas')
+            h_h = 1.2 * Nu_h_val * p_h['lambda'] / self.he.Dh_hot
+
+            # COLD SIDE CORRELATIONS
+            p_c = self.h2_props.get_helium_properties(self.he.Tc[i], self.he.Pc[i])
+            # Calculate flow properties explicitly
+            mc = self.he.config['operating']['mc']
+            u_c = mc / (p_c['rho'] * self.he.Ac_cold)
+            Re_c = p_c['rho'] * u_c * self.he.Dh_cold / p_c['mu']
+            Pr_c = p_c['mu'] * p_c['cp'] / p_c['lambda']
+
+            Nu_c_val, f_c_val = TPMSCorrelations.get_correlations(self.he.TPMS_cold, Re_c, Pr_c, 'Gas')
+            h_c = Nu_c_val * p_c['lambda'] / self.he.Dh_cold
+
+            # Overall U
+            U[i] = 1 / (1 / h_h + self.he.wall_thickness / self.he.k_wall + 1 / h_c)
+
+            # Calculate the heat transfer rate using LMTD method
+            Th_in = self.he.Th[i]
+            Th_out = self.he.Th[i+1]
+            Tc_in = self.he.Tc[i+1]  # Cold flows backwards
+            Tc_out = self.he.Tc[i]
+
+            dT1 = Th_in - Tc_out  # Temperature difference at one end
+            dT2 = Th_out - Tc_in  # Temperature difference at other end
+
+            if abs(dT1 - dT2) < 1e-6:  # If they're essentially equal
+                LMTD = dT1
+            else:
+                LMTD = (dT1 - dT2) / np.log(abs(dT1 / dT2))
+
+            A_elem = self.he.A_heat / N
+            Q[i] = U[i] * A_elem * LMTD
+
+        return U, Q
 
 
 def compare_tpms_structures():

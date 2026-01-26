@@ -68,7 +68,7 @@ def example_4_parametric_study():
     print("="*70 + "\n")
     
     # Mass flow rate range
-    mh_range = np.linspace(0.5e-3, 2e-3, 5)  # kg/s
+    mh_range = np.linspace(0.5e-1, 2e-1, 5)  # kg/s
     
     results = {
         'mh': [],
@@ -88,7 +88,7 @@ def example_4_parametric_study():
         config['solver']['n_elements'] = 15  # Reduce for speed
         
         he = TPMSHeatExchanger(config)
-        converged = he.solve(max_iter=300, tolerance=5e-3, relaxation=0.4)
+        converged = he.solve(max_iter=300, tolerance=5e-3)
         
         if converged:
             h2_props = HydrogenProperties()
@@ -209,7 +209,7 @@ def example_6_design_optimization():
         config['solver']['n_elements'] = 15
         
         he = TPMSHeatExchanger(config)
-        converged = he.solve(max_iter=200, tolerance=1e-2, relaxation=0.4)
+        converged = he.solve(max_iter=200, tolerance=1e-2)
         
         if converged:
             h2_props = HydrogenProperties()

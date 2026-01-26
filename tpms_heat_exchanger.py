@@ -38,10 +38,8 @@ class TPMSHeatExchanger:
         self.porosity_cold = config['geometry']['porosity_cold']
         self.unit_cell = config['geometry']['unit_cell_size']
         self.wall_thickness = config['geometry']['wall_thickness']
-
         self.TPMS_hot = config['tpms']['type_hot']
         self.TPMS_cold = config['tpms']['type_cold']
-
         self._calculate_geometry()
         self.N_elements = config['solver']['n_elements']
         self._initialize_solution()
@@ -377,6 +375,131 @@ class TPMSHeatExchanger:
         print(f"Hot Stream Enthalpy Drop: {Q_hot_loss:.2f} W")
         print(f"Cold Stream Enthalpy Rise: {Q_cold_gain:.2f} W")
         print(f"Imbalance: {abs(Q_hot_loss - Q_cold_gain):.2f} W")
+
+    def _calculate_hot_properties(self):
+        """
+        Calculate properties for the hot stream
+        """
+        N = len(self.Th)
+        props = {
+            'T': self.Th,
+            'P': self.Ph,
+            'x': self.xh,
+            'h': np.zeros(N),
+            'rho': np.zeros(N),
+            'cp': np.zeros(N),
+            'mu': np.zeros(N),
+            'lambda': np.zeros(N),
+            'Pr': np.zeros(N),
+            'Re': np.zeros(N),
+            'Nu': np.zeros(N),
+            'h_coeff': np.zeros(N)
+        }
+        
+        mh = self.config['operating']['mh']
+        
+        for i in range(N):
+            p = self._safe_get_prop(self.Th[i], self.Ph[i], self.xh[i], False)
+            
+            props['h'][i] = p['h']
+            props['rho'][i] = p['rho']
+            props['cp'][i] = p['cp']
+            props['mu'][i] = p['mu']
+            props['lambda'][i] = p['lambda']
+            props['Pr'][i] = p['mu'] * p['cp'] / p['lambda']
+            
+            # Calculate Re and Nu
+            u = mh / (p['rho'] * self.Ac_hot)
+            props['Re'][i] = p['rho'] * u * self.Dh_hot / p['mu']
+            
+            Nu, f = TPMSCorrelations.get_correlations(self.TPMS_hot, props['Re'][i], props['Pr'][i], 'Gas')
+            props['Nu'][i] = Nu
+            
+            # Heat transfer coefficient with catalyst enhancement
+            props['h_coeff'][i] = 1.2 * Nu * p['lambda'] / self.Dh_hot
+        
+        return props
+
+    def _calculate_cold_properties(self):
+        """
+        Calculate properties for the cold stream
+        """
+        N = len(self.Tc)
+        props = {
+            'T': self.Tc,
+            'P': self.Pc,
+            'h': np.zeros(N),
+            'rho': np.zeros(N),
+            'cp': np.zeros(N),
+            'mu': np.zeros(N),
+            'lambda': np.zeros(N),
+            'Pr': np.zeros(N),
+            'Re': np.zeros(N),
+            'Nu': np.zeros(N),
+            'h_coeff': np.zeros(N)
+        }
+        
+        mc = self.config['operating']['mc']
+        
+        for i in range(N):
+            p = self._safe_get_prop(self.Tc[i], self.Pc[i], None, True)  # is_helium=True for cold stream
+            
+            props['h'][i] = p['h']
+            props['rho'][i] = p['rho']
+            props['cp'][i] = p['cp']
+            props['mu'][i] = p['mu']
+            props['lambda'][i] = p['lambda']
+            props['Pr'][i] = p['mu'] * p['cp'] / p['lambda']
+            
+            # Calculate Re and Nu
+            u = mc / (p['rho'] * self.Ac_cold)
+            props['Re'][i] = p['rho'] * u * self.Dh_cold / p['mu']
+            
+            Nu, f = TPMSCorrelations.get_correlations(self.TPMS_cold, props['Re'][i], props['Pr'][i], 'Gas')
+            props['Nu'][i] = Nu
+            
+            # Heat transfer coefficient
+            props['h_coeff'][i] = Nu * p['lambda'] / self.Dh_cold
+        
+        return props
+
+    def _calculate_heat_transfer(self, props_h, props_c):
+        """
+        Calculate heat transfer performance using LMTD method
+        """
+        N = self.N_elements
+        U_overall = np.zeros(N)
+        Q_element = np.zeros(N)
+        
+        for i in range(N):
+            # Overall heat transfer coefficient
+            h_hot = props_h['h_coeff'][i]
+            h_cold = props_c['h_coeff'][i+1]  # Cold stream flows counter-current
+            
+            U = 1 / (1/h_hot + self.wall_thickness/self.k_wall + 1/h_cold)
+            U_overall[i] = U
+            
+            # LMTD calculation for counterflow
+            # Hot stream: i -> i+1
+            # Cold stream: (N-1-i) -> (N-1-(i+1)) = (N-1-i-1) = (N-2-i)
+            # Since cold flows in opposite direction, the cold inlet at element i 
+            # corresponds to index (N-1-i) and outlet to (N-1-(i+1)) = (N-2-i)
+            
+            # For counterflow heat exchanger
+            dT1 = self.Th[i] - self.Tc[i + 1]  # Hot in - Cold out
+            dT2 = self.Th[i + 1] - self.Tc[i]  # Hot out - Cold in
+            
+            if abs(dT1 - dT2) < 1e-6:
+                LMTD = dT1
+            else:
+                LMTD = (dT1 - dT2) / np.log(abs(dT1 / dT2))
+            
+            # Heat transfer rate in this element
+            A_elem = self.A_heat / N
+            Q_element[i] = U * A_elem * LMTD
+        
+        return U_overall, Q_element
+
 
 def create_default_config():
     """Create default configuration dictionary"""

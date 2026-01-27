@@ -14,6 +14,7 @@ import time
 from scipy.optimize import fsolve
 import warnings
 
+from TPMS_heat_HE_local.tpms_visualization import TPMSVisualizer
 from hydrogen_properties import HydrogenProperties
 from tpms_correlations import TPMSCorrelations
 
@@ -526,3 +527,7 @@ if __name__ == "__main__":
     config = create_default_config()
     he = TPMSHeatExchanger(config)
     he.solve()
+
+    vis = TPMSVisualizer(he)
+    vis.plot_comprehensive(save_path='tpms_comprehensive.png')
+    vis.plot_performance_metrics(save_path='tpms_metrics.png')

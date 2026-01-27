@@ -16,6 +16,8 @@ import time
 from scipy.optimize import fsolve
 import warnings
 
+from TPMS_heat_HE_local.tpms_visualization import TPMSVisualizer
+
 warnings.filterwarnings("ignore", message="Some Re values outside validated range")
 
 
@@ -510,8 +512,8 @@ def create_default_config():
             'Tc_in': 43.5,
             'Ph_in': 2e6,
             'Pc_in': 0.5e6,
-            'mh': 6e-2,
-            'mc': 12e-2,
+            'mh': 60e-2,
+            'mc': 120e-2,
             'xh_in': 0.452
         },
         'catalyst': {
@@ -529,3 +531,7 @@ if __name__ == "__main__":
     config = create_default_config()
     he = TPMSHeatExchangerHydraulic(config)
     he.solve()
+
+    vis = TPMSVisualizer(he)
+    vis.plot_comprehensive(save_path='tpms_comprehensive.png')
+    vis.plot_performance_metrics(save_path='tpms_metrics.png')

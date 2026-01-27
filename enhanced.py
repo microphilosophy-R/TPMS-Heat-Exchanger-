@@ -20,6 +20,8 @@ import warnings
 import pandas as pd
 from pathlib import Path
 
+from TPMS_heat_HE_local.tpms_visualization import TPMSVisualizer
+
 warnings.filterwarnings("ignore")
 
 # Set plot style
@@ -133,7 +135,7 @@ class ConvergenceTracker:
 
         # 4. Total heat load with oscillation highlight
         ax = axes[1, 0]
-        ax.plot(iter_data, np.array(self.history['Q_total'])/1000, 'purple', linewidth=2)
+        ax.plot(iter_data, np.array(self.history['Q_total']) / 1000, 'purple', linewidth=2)
         ax.set_xlabel('Iteration')
         ax.set_ylabel('Heat Load [kW]')
         ax.set_title('Total Heat Transfer')
@@ -144,8 +146,8 @@ class ConvergenceTracker:
         # 5. Q Oscillation (NEW!)
         ax = axes[1, 1]
         if len(self.history['Q_oscillation']) > 0:
-            ax.semilogy(iter_data, np.array(self.history['Q_oscillation'])*100,
-                       'darkred', linewidth=2)
+            ax.semilogy(iter_data, np.array(self.history['Q_oscillation']) * 100,
+                        'darkred', linewidth=2)
             ax.axhline(y=1, color='orange', linestyle='--', linewidth=1, label='1% threshold')
         ax.set_xlabel('Iteration')
         ax.set_ylabel('Q Change [%]')
@@ -181,9 +183,9 @@ class ConvergenceTracker:
 
         # 8. Pressure drops
         ax = axes[2, 1]
-        ax.plot(iter_data, np.array(self.history['dP_hot'])/1000, 'r-',
+        ax.plot(iter_data, np.array(self.history['dP_hot']) / 1000, 'r-',
                 linewidth=2, label='Hot side')
-        ax.plot(iter_data, np.array(self.history['dP_cold'])/1000, 'b-',
+        ax.plot(iter_data, np.array(self.history['dP_cold']) / 1000, 'b-',
                 linewidth=2, label='Cold side')
         ax.set_xlabel('Iteration')
         ax.set_ylabel('Pressure Drop [kPa]')
@@ -220,8 +222,8 @@ class ConvergenceTracker:
                 f"Para-H₂: {final_x_para:.4f}\n"
             )
             ax.text(0.1, 0.5, summary_text, transform=ax.transAxes,
-                   fontsize=14, verticalalignment='center',
-                   bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+                    fontsize=14, verticalalignment='center',
+                    bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
         plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches='tight')
@@ -356,6 +358,9 @@ class TPMSHeatExchangerImproved:
         # Initialize temperature solver
         self.T_solver = RobustTemperatureSolver()
 
+        # Initialize relaxing for temperature
+        self.relax = config['solver'].get('relax', 0.15)
+
         # Initialize Q storage for damping
         self.Q_prev = None
         self.Q_damping_factor = config['solver'].get('Q_damping', 0.5)
@@ -473,15 +478,15 @@ class TPMSHeatExchangerImproved:
         """Calculate heat transfer coefficient using TPMS correlations"""
         # TPMS Nusselt number correlations
         if tpms_type == 'Diamond':
-            Nu = 0.409 * Re**0.625 * Pr**0.4
+            Nu = 0.409 * Re ** 0.625 * Pr ** 0.4
         elif tpms_type == 'Gyroid':
-            Nu = 0.325 * Re**0.700 * Pr**0.36
+            Nu = 0.325 * Re ** 0.700 * Pr ** 0.36
         elif tpms_type == 'FKS':
-            Nu = 0.52 * Re**0.61 * Pr**0.4
+            Nu = 0.52 * Re ** 0.61 * Pr ** 0.4
         elif tpms_type == 'Primitive':
-            Nu = 0.1 * Re**0.75 * Pr**0.36
+            Nu = 0.1 * Re ** 0.75 * Pr ** 0.36
         else:
-            Nu = 0.4 * Re**0.65 * Pr**0.4
+            Nu = 0.4 * Re ** 0.65 * Pr ** 0.4
 
         h = Nu * lambda_f / Dh
 
@@ -493,15 +498,15 @@ class TPMSHeatExchangerImproved:
     def _get_friction_factor(self, Re, tpms_type):
         """Calculate friction factor using TPMS correlations"""
         if tpms_type == 'Diamond':
-            f = 2.5892 * Re**(-0.1940)
+            f = 2.5892 * Re ** (-0.1940)
         elif tpms_type == 'Gyroid':
-            f = 2.5 * Re**(-0.2)
+            f = 2.5 * Re ** (-0.2)
         elif tpms_type == 'FKS':
-            f = 2.1335 * Re**(-0.1334)
+            f = 2.1335 * Re ** (-0.1334)
         elif tpms_type == 'Primitive':
-            f = 4.0 * Re**(-0.25)
+            f = 4.0 * Re ** (-0.25)
         else:
-            f = 3.0 * Re**(-0.2)
+            f = 3.0 * Re ** (-0.2)
 
         return f
 
@@ -509,14 +514,14 @@ class TPMSHeatExchangerImproved:
         """Calculate pressure drop for TPMS structure"""
         Re = rho * u * Dh / mu
         f = self._get_friction_factor(Re, tpms_type)
-        dP = f * (L / Dh) * (rho * u**2 / 2)
+        dP = f * (L / Dh) * (rho * u ** 2 / 2)
         return dP, f, Re
 
-    def solve(self, max_iter=300, tolerance=1e-3):
-        """Main solver loop with improved robustness and Q damping"""
-        print("=" * 70)
-        print("TPMS Heat Exchanger - IMPROVED SOLVER WITH Q DAMPING")
-        print("=" * 70)
+    def solve(self, max_iter=500, tolerance=1e-3):
+        """Main solver loop with improved robustness, Q damping, and Q error tracking"""
+        print("=" * 100)
+        print("TPMS Heat Exchanger - IMPROVED SOLVER WITH Q ERROR TRACKING")
+        print("=" * 100)
         print(f"Initial Q damping factor: {self.Q_damping_factor:.3f}")
         print(f"Adaptive damping: {'Enabled' if self.adaptive_damping else 'Disabled'}")
 
@@ -535,17 +540,20 @@ class TPMSHeatExchangerImproved:
 
         # Adaptive damping parameters
         Q_oscillation_history = []
-        damping_increase_threshold = 0.05  # 5% oscillation triggers damping increase
-        damping_decrease_threshold = 0.01  # 1% oscillation allows damping decrease
+        damping_increase_threshold = 0.05
+        damping_decrease_threshold = 0.01
 
         start_time = time.time()
 
         for iteration in range(max_iter):
-            # Store old values
+            # Store old values for error calculation
             Th_old = self.Th.copy()
             Tc_old = self.Tc.copy()
             Ph_old = self.Ph.copy()
             Pc_old = self.Pc.copy()
+
+            # Store Q from previous step explicitly for error calc before update
+            Q_old_iter = self.Q_prev.copy()
 
             # --- Element-wise calculations ---
             for i in range(self.N_elements):
@@ -578,23 +586,10 @@ class TPMSHeatExchangerImproved:
                     Re_c, Pr_c, self.TPMS_cold, self.Dh_cold, props_c['lambda'], False)
 
                 # Overall heat transfer coefficient
-                U = 1 / (1/h_h + self.wall_thickness/self.k_wall + 1/h_c)
-
-                # LMTD (counterflow, element i)
-                # dT_h = self.Th[i] - self.Tc[self.N_elements - i]
-                # dT_c = self.Th[i + 1] - self.Tc[self.N_elements - i - 1]
-
-                # if dT_h * dT_c > 0:  # Same sign
-                #     if abs(dT_h - dT_c) < 0.01:
-                #         LMTD = dT_h
-                #     else:
-                #         LMTD = (dT_h - dT_c) / np.log(dT_h / dT_c)
-                # else:
-                #     LMTD = 0.5 * (abs(dT_h) + abs(dT_c))
-
+                U = 1 / (1 / h_h + self.wall_thickness / self.k_wall + 1 / h_c)
 
                 # Calculate RAW heat transfer (undamped)
-                Q_raw[i] = U * self.A_elem * (T_h_avg-T_c_avg)
+                Q_raw[i] = U * self.A_elem * (T_h_avg - T_c_avg)
 
                 # Pressure drops
                 dP_hot[i], _, _ = self._calculate_pressure_drop(
@@ -607,89 +602,74 @@ class TPMSHeatExchangerImproved:
 
             # --- Apply Q Damping ---
             if iteration == 0:
-                # First iteration: use raw Q
-                Q = Q_raw.copy()*0.1
+                Q = Q_raw.copy() * 0.1
             else:
-                # Apply damping: Q_new = alpha * Q_raw + (1-alpha) * Q_prev
                 alpha = self.Q_damping_factor
                 Q = alpha * Q_raw + (1 - alpha) * self.Q_prev
 
-            # Calculate Q oscillation for adaptive damping
+            # --- Q Oscillation & Damping Logic ---
             Q_total_current = np.sum(Q)
             Q_total_prev = np.sum(self.Q_prev) if iteration > 0 else Q_total_current
             Q_oscillation = abs(Q_total_current - Q_total_prev) / max(abs(Q_total_current), 1e-10)
             Q_oscillation_history.append(Q_oscillation)
 
-            # Adaptive damping logic (after 10 iterations)
             if self.adaptive_damping and iteration > 10:
-                # Calculate recent oscillation (last 5 iterations)
                 recent_oscillation = np.mean(Q_oscillation_history[-5:])
-
                 if recent_oscillation > damping_increase_threshold:
-                    # High oscillation: decrease alpha (more damping)
                     self.Q_damping_factor = max(0.1, self.Q_damping_factor * 0.9)
-                    if iteration % 20 == 0:
-                        print(f"  ⚠ High Q oscillation detected, increasing damping (α→{self.Q_damping_factor:.3f})")
                 elif recent_oscillation < damping_decrease_threshold and self.Q_damping_factor < 0.8:
-                    # Low oscillation: increase alpha (less damping, faster convergence)
                     self.Q_damping_factor = min(0.9, self.Q_damping_factor * 1.05)
-                    if iteration % 20 == 0:
-                        print(f"  ✓ Stable convergence, reducing damping (α→{self.Q_damping_factor:.3f})")
 
-            # Store current Q for next iteration
+            # Update Q history
             self.Q_prev = Q.copy()
-
-            # Store Q for convergence tracking
             self._last_Q = Q.copy()
 
-            # --- Update pressures ---
+            # --- Update Pressures ---
             for i in range(self.N_elements):
                 self.Ph[i + 1] = self.Ph[i] - dP_hot[i]
                 self.Pc[i] = self.Pc[i + 1] + dP_cold[self.N_elements - i - 1]
 
-            # --- Update enthalpies ---
+            # --- Update Enthalpies ---
             hh = np.zeros(self.N_elements + 1)
             hc = np.zeros(self.N_elements + 1)
 
-            # Hot (Forward)
-            hh[0] = self._safe_get_prop(self.config['operating']['Th_in'],
-                                        self.Ph[0], self.xh[0], False)['h']
+            hh[0] = self._safe_get_prop(self.config['operating']['Th_in'], self.Ph[0], self.xh[0], False)['h']
             for i in range(self.N_elements):
                 hh[i + 1] = hh[i] - Q[i] / mh
 
-            # Cold (Backward)
-            hc[-1] = self._safe_get_prop(self.config['operating']['Tc_in'],
-                                         self.Pc[-1], None, True)['h']
+            hc[-1] = self._safe_get_prop(self.config['operating']['Tc_in'], self.Pc[-1], None, True)['h']
             for i in range(self.N_elements - 1, -1, -1):
                 hc[i] = hc[i + 1] + Q[i] / mc
 
-            # --- Update temperatures using robust solver ---
-            # Hot Stream
+            # --- Update Temperatures (Hot) ---
             for i in range(len(hh)):
-                T_new = self.T_solver.solve(
-                    hh[i], self.Ph[i], self.xh[i], False,
-                    self._safe_get_prop, self.Th[i],
-                    T_bounds=(14.0, 400.0)
-                )
-                # Damped update
-                self.Th[i] = 0.7 * self.Th[i] + 0.3 * T_new
+                def res_h(T):
+                    return self._safe_get_prop(T, self.Ph[i], self.xh[i], False)['h'] - hh[i]
 
-            # Cold Stream
+                guess = np.clip(self.Th[i], 14.0, 400.0)
+                try:
+                    sol = fsolve(res_h, guess, xtol=1e-3)
+                    self.Th[i] = 0.8 * self.Th[i] + 0.2 * np.clip(sol[0], 14.0, 400.0)
+                except:
+                    pass
+
+            # --- Update Temperatures (Cold) ---
             for i in range(len(hc)):
-                T_new = self.T_solver.solve(
-                    hc[i], self.Pc[i], None, True,
-                    self._safe_get_prop, self.Tc[i],
-                    T_bounds=(4.0, 400.0)
-                )
-                self.Tc[i] = 0.7 * self.Tc[i] + 0.3 * T_new
+                def res_c(T):
+                    return self._safe_get_prop(T, self.Pc[i], None, True)['h'] - hc[i]
 
-            # # --- Enforce monotonicity ---
-            # if iteration > 5:
-            #     for i in range(self.N_elements):
-            #         if self.Th[i + 1] > self.Th[i]:
-            #             self.Th[i + 1] = self.Th[i] - 0.01
-            #         if self.Tc[i + 1] > self.Tc[i]:
-            #             self.Tc[i + 1] = self.Tc[i] - 0.01
+                guess = np.clip(self.Tc[i], 4.0, 400.0)
+                try:
+                    sol = fsolve(res_c, guess, xtol=1e-3)
+                    self.Tc[i] = 0.8 * self.Tc[i] + 0.2 * np.clip(sol[0], 4.0, 400.0)
+                except:
+                    pass
+
+            # Physics Check
+            if iteration > 5:
+                for i in range(self.N_elements):
+                    if self.Tc[i + 1] > self.Tc[i]:
+                        self.Tc[i + 1] = self.Tc[i] - 1e-4
 
             # --- Ortho-Para Conversion ---
             if self.h2_props is not None:
@@ -697,33 +677,53 @@ class TPMSHeatExchangerImproved:
                     xh_new = self._ortho_para_conversion()
                     self.xh = self.xh + 0.1 * (xh_new - self.xh)
                 except:
-                    x_eq_out = 0.9
-                    self.xh = np.linspace(self.xh[0], x_eq_out, len(self.xh))
+                    pass
             else:
-                x_eq_out = 0.9
-                self.xh = np.linspace(self.xh[0], x_eq_out, len(self.xh))
+                self.xh = np.linspace(self.xh[0], 0.9, len(self.xh))
 
-            # --- Convergence Check ---
+            # --- ERROR CALCULATION WITH Q ---
             err_T = np.max(np.abs(self.Th - Th_old)) + np.max(np.abs(self.Tc - Tc_old))
             err_P = np.max(np.abs(self.Ph - Ph_old)) + np.max(np.abs(self.Pc - Pc_old))
-            err = err_T + err_P * 1e-6
 
-            # Update tracker with damping factor
+            # Calculate Q error (max absolute difference in Watts)
+            err_Q = np.max(np.abs(Q - Q_old_iter))
+
+            # Total Error: Combine T, P (scaled), and Q (scaled)
+            # Scaling Q by 1e-4 so 10W error ~ 0.001 total error impact
+            err = err_T + (err_P * 1e-6) + (err_Q * 1e-4)
+
+            # --- Stability Enforcement (Replaces Monotonicity) ---
+            # PREVENTS: Temperature Crossover (Th < Tc)
+            # ALLOWS: Exothermic heating of hot stream
+
+            # if iteration > 5 and err > 1:  # Allow initial 5 iterations to settle
+            #     min_approach = max(abs(err_T), 0.01)  # Minimum temp difference (K)
+            #
+            #     for i in range(len(self.Th)):
+            #         # Check if Hot drops below Cold (plus margin)
+            #         if self.Th[i] < self.Tc[i] + min_approach:
+            #             # We have a crossover! Force them apart.
+            #             # Calculate the average to reset them to a physical state
+            #             T_avg = 0.5 * (self.Th[i] + self.Tc[i])
+            #
+            #             # Push Hot slightly above, Cold slightly below
+            #             self.Th[i] = T_avg + 0.5 * min_approach
+            #             self.Tc[i] = T_avg - 0.5 * min_approach
+
+            # Update tracker
             self.tracker.update(iteration + 1, err, self, self.Q_damping_factor)
 
+            # Print status every 20 iterations
             if (iteration + 1) % 20 == 0:
                 Q_total = np.sum(Q)
-                dP_hot_total = self.Ph[0] - self.Ph[-1]
-                dP_cold_total = self.Pc[-1] - self.Pc[0]
-                print(f"Iter {iteration + 1:3d} | Err: {err:.4f} | Q: {Q_total:.1f} W | "
-                      f"ΔP_hot: {dP_hot_total/1e3:.2f} kPa | ΔP_cold: {dP_cold_total/1e3:.2f} kPa | "
-                      f"α: {self.Q_damping_factor:.3f}")
+                print(f"Iter {iteration + 1:3d} | Err Tot: {err:.4f} | "
+                      f"Err T: {err_T:.4f} | Err P: {err_P:.1e} | Err Q: {err_Q:.4f} | "
+                      f"Q: {Q_total:.1f}W")
 
             if err < tolerance:
                 elapsed = time.time() - start_time
                 print(f"\n✓ CONVERGED in {iteration + 1} iterations ({elapsed:.2f} s)")
-                print(f"  Final damping factor: {self.Q_damping_factor:.3f}")
-                print(f"  Final Q oscillation: {Q_oscillation*100:.4f}%")
+                print(f"  Final Errors -> T: {err_T:.2e}, P: {err_P:.2e}, Q: {err_Q:.2e}")
                 self._print_results(Q, dP_hot, dP_cold)
                 return True
 
@@ -739,7 +739,7 @@ class TPMSHeatExchangerImproved:
         x_eq_func = self.h2_props.get_equilibrium_fraction
 
         for i in range(self.N_elements):
-            T_avg = 0.5 * (self.Th[i] + self.Th[i+1])
+            T_avg = 0.5 * (self.Th[i] + self.Th[i + 1])
             x_eq = x_eq_func(T_avg)
 
             k_rate = 0.2
@@ -749,7 +749,7 @@ class TPMSHeatExchangerImproved:
             tau = self.L_elem / u
 
             dx = k_rate * (x_eq - self.xh[i]) * tau
-            xh_new[i+1] = np.clip(self.xh[i] + dx, 0.0, 1.0)
+            xh_new[i + 1] = np.clip(self.xh[i] + dx, 0.0, 1.0)
 
         return xh_new
 
@@ -761,23 +761,23 @@ class TPMSHeatExchangerImproved:
 
         # Temperatures
         print("\nTemperatures:")
-        print(f"  Hot:  {self.Th[0]:.2f} K → {self.Th[-1]:.2f} K (ΔT = {self.Th[0]-self.Th[-1]:.2f} K)")
-        print(f"  Cold: {self.Tc[-1]:.2f} K → {self.Tc[0]:.2f} K (ΔT = {self.Tc[0]-self.Tc[-1]:.2f} K)")
+        print(f"  Hot:  {self.Th[0]:.2f} K → {self.Th[-1]:.2f} K (ΔT = {self.Th[0] - self.Th[-1]:.2f} K)")
+        print(f"  Cold: {self.Tc[-1]:.2f} K → {self.Tc[0]:.2f} K (ΔT = {self.Tc[0] - self.Tc[-1]:.2f} K)")
 
         # Pressures
         dP_hot_total = self.Ph[0] - self.Ph[-1]
         dP_cold_total = self.Pc[-1] - self.Pc[0]
         print("\nPressures:")
-        print(f"  Hot:  {self.Ph[0]/1e6:.3f} MPa → {self.Ph[-1]/1e6:.3f} MPa "
-              f"(ΔP = {dP_hot_total/1e3:.2f} kPa, {dP_hot_total/self.Ph[0]*100:.2f}%)")
-        print(f"  Cold: {self.Pc[-1]/1e6:.3f} MPa → {self.Pc[0]/1e6:.3f} MPa "
-              f"(ΔP = {dP_cold_total/1e3:.2f} kPa, {dP_cold_total/self.Pc[-1]*100:.2f}%)")
+        print(f"  Hot:  {self.Ph[0] / 1e6:.3f} MPa → {self.Ph[-1] / 1e6:.3f} MPa "
+              f"(ΔP = {dP_hot_total / 1e3:.2f} kPa, {dP_hot_total / self.Ph[0] * 100:.2f}%)")
+        print(f"  Cold: {self.Pc[-1] / 1e6:.3f} MPa → {self.Pc[0] / 1e6:.3f} MPa "
+              f"(ΔP = {dP_cold_total / 1e3:.2f} kPa, {dP_cold_total / self.Pc[-1] * 100:.2f}%)")
 
         # Heat transfer
         Q_total = np.sum(Q)
         print("\nHeat Transfer:")
         print(f"  Total heat load: {Q_total:.2f} W")
-        print(f"  Average heat flux: {Q_total/self.A_heat:.2f} W/m²")
+        print(f"  Average heat flux: {Q_total / self.A_heat:.2f} W/m²")
 
         # Conversion
         print("\nConversion:")
@@ -831,14 +831,14 @@ def create_default_config():
     """Create default configuration"""
     return {
         'geometry': {
-            'length': 10.94,
-            'width': 0.15,
-            'height': 0.10,
+            'length': 0.94,
+            'width': 0.25,
+            'height': 0.25,
             'porosity_hot': 0.65,
             'porosity_cold': 0.70,
             'unit_cell_size': 5e-3,
             'wall_thickness': 0.5e-3,
-            'surface_area_density': 600
+            'surface_area_density': 1600
         },
         'tpms': {
             'type_hot': 'Diamond',
@@ -848,31 +848,32 @@ def create_default_config():
             'k_wall': 237
         },
         'operating': {
-            'Th_in': 66.3,
-            'Tc_in': 14.56,
+            'Th_in': 78,
+            'Tc_in': 43,
             'Ph_in': 2e6,
-            'Pc_in': 0.5e6,
-            'mh': 1e-2,
-            'mc': 6e-2,
+            'Pc_in': 1.5e6,
+            'mh': 200e-2,
+            'mc': 1800e-2,
             'xh_in': 0.452
         },
         'catalyst': {
             'enhancement': 1.2
         },
         'solver': {
-            'n_elements': 50,
-            'max_iter': 300,
+            'n_elements': 100,
+            'max_iter': 500,
             'tolerance': 1e-3,
             'Q_damping': 0.5,  # Relaxation factor for heat load (0=no update, 1=no damping)
-            'adaptive_damping': True  # Automatically adjust damping based on oscillations
+            'adaptive_damping': True,  # Automatically adjust damping based on oscillations
+            'relax': 0.15
         }
     }
 
 
 if __name__ == "__main__":
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("TPMS HEAT EXCHANGER - IMPROVED VERSION")
-    print("="*70 + "\n")
+    print("=" * 70 + "\n")
 
     # Create configuration
     config = create_default_config()
@@ -883,6 +884,11 @@ if __name__ == "__main__":
     # Solve
     converged = he.solve()
 
+    # Visualize
+    vis = TPMSVisualizer(he)
+    vis.plot_comprehensive(save_path='tpms_comprehensive.png')
+    vis.plot_performance_metrics(save_path='tpms_metrics.png')
+
     # Generate convergence plot
     print("\nGenerating convergence diagnostics...")
     he.tracker.plot('tpms_convergence_history.png')
@@ -890,10 +896,10 @@ if __name__ == "__main__":
     # Export data
     he.tracker.export_csv('tpms_convergence_data.csv')
 
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("ANALYSIS COMPLETE")
-    print("="*70)
+    print("=" * 70)
     print("\nGenerated files:")
     print("  ✓ tpms_convergence_history.png - Convergence visualization")
     print("  ✓ tpms_convergence_data.csv - Iteration data for analysis")
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)

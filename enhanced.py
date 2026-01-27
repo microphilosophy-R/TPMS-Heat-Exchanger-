@@ -19,20 +19,11 @@ from scipy.optimize import fsolve, root, minimize_scalar
 import warnings
 import pandas as pd
 from pathlib import Path
-
-from TPMS_heat_HE_local.tpms_visualization import TPMSVisualizer
+from tpms_correlations import TPMSCorrelations
+from tpms_visualization import TPMSVisualizer
 
 warnings.filterwarnings("ignore")
 
-# Set plot style
-plt.rcParams['font.family'] = 'Times New Roman'
-plt.rcParams['font.size'] = 14
-plt.rcParams['axes.labelsize'] = 16
-plt.rcParams['axes.titlesize'] = 16
-plt.rcParams['xtick.labelsize'] = 14
-plt.rcParams['ytick.labelsize'] = 14
-plt.rcParams['legend.fontsize'] = 14
-plt.rcParams['figure.dpi'] = 100
 
 class ConvergenceTracker:
     """Track and visualize convergence history"""
@@ -236,6 +227,7 @@ class ConvergenceTracker:
         df.to_csv(filepath, index=False)
         print(f"✓ Convergence data exported: {filepath}")
 
+
 class TPMSHeatExchangerImproved:
     """
     Improved TPMS Heat Exchanger Solver
@@ -248,7 +240,7 @@ class TPMSHeatExchangerImproved:
         try:
             from hydrogen_properties import HydrogenProperties
             self.h2_props = HydrogenProperties()
-        except:
+        except ImportError:
             print("Warning: hydrogen_properties module not found, using simplified properties")
             self.h2_props = None
 
@@ -276,6 +268,31 @@ class TPMSHeatExchangerImproved:
         self.Q_damping_factor = config['solver'].get('Q_damping', 0.5)
         self.adaptive_damping = config['solver'].get('adaptive_damping', True)
 
+        # NEW: Stream-specific attributes for better organization
+        self.hot_stream = {
+            'temperature': None,
+            'pressure': None,
+            'concentration': None,
+            'mass_flow': config['operating']['mh'],
+            'area_flow': None,
+            'hydraulic_diameter': None,
+            'tpms_type': self.TPMS_hot,
+            'flow_area': None,
+            'properties': []
+        }
+        
+        self.cold_stream = {
+            'temperature': None,
+            'pressure': None,
+            'concentration': None,  # Not applicable for cold stream (helium)
+            'mass_flow': config['operating']['mc'],
+            'area_flow': None,
+            'hydraulic_diameter': None,
+            'tpms_type': self.TPMS_cold,
+            'flow_area': None,
+            'properties': []
+        }
+
         self._calculate_geometry()
         self._initialize_solution()
 
@@ -296,6 +313,12 @@ class TPMSHeatExchangerImproved:
 
         # Wall properties
         self.k_wall = self.config['material']['k_wall']
+
+        # Update stream-specific attributes
+        self.hot_stream['hydraulic_diameter'] = self.Dh_hot
+        self.hot_stream['flow_area'] = self.Ac_hot
+        self.cold_stream['hydraulic_diameter'] = self.Dh_cold
+        self.cold_stream['flow_area'] = self.Ac_cold
 
     def _initialize_solution(self):
         """Initialize with improved initial guess"""
@@ -321,6 +344,10 @@ class TPMSHeatExchangerImproved:
         self.Th = np.linspace(Th_in, Th_out_guess, N)
         self.Tc = np.linspace(Tc_out_guess, Tc_in, N)  # Cold flows opposite
 
+        # Initialize stream-specific data
+        self.hot_stream['temperature'] = self.Th.copy()
+        self.cold_stream['temperature'] = self.Tc.copy()
+
         # Pressure initialization (assume 5% pressure drop for initial guess)
         Ph_drop_guess = 0.05 * self.config['operating']['Ph_in']
         Pc_drop_guess = 0.05 * self.config['operating']['Pc_in']
@@ -330,17 +357,22 @@ class TPMSHeatExchangerImproved:
         self.Pc = np.linspace(self.config['operating']['Pc_in'] - Pc_drop_guess,
                               self.config['operating']['Pc_in'], N)
 
+        # Initialize stream-specific pressure data
+        self.hot_stream['pressure'] = self.Ph.copy()
+        self.cold_stream['pressure'] = self.Pc.copy()
+
         # Para-hydrogen fraction - use equilibrium estimate
         xh_in = self.config['operating']['xh_in']
         if self.h2_props is not None:
             try:
                 xh_out_guess = self.h2_props.get_equilibrium_fraction(Th_out_guess)
-            except:
+            except Exception:
                 xh_out_guess = 0.95  # High conversion expected
         else:
             xh_out_guess = 0.95
 
         self.xh = np.linspace(xh_in, xh_out_guess, N)
+        self.hot_stream['concentration'] = self.xh.copy()
 
         # Element length
         self.L_elem = self.L_HE / self.N_elements
@@ -350,39 +382,71 @@ class TPMSHeatExchangerImproved:
         print(f"  T_cold: {Tc_in:.2f} K → {Tc_out_guess:.2f} K")
         print(f"  x_para: {xh_in:.4f} → {xh_out_guess:.4f}")
 
-    def _safe_get_prop(self, T, P, x=None, is_helium=False):
-        """Get fluid properties with fallback"""
-        # Clamp temperature to safe range
-        T = np.clip(T, 14.0 if not is_helium else 4.0, 400.0)
+    def _update_stream_physics(self, T, P, x, mass_flow, Ac, Dh, tpms_type, is_cold):
+        """
+        Optimized stream update with Branch Lifting (Separate loops for Hot/Cold).
+        """
+        N = len(T)
+        props_list = [None] * N
+        h_coeffs = np.zeros(N - 1)
+        P_new = P.copy()
 
-        if self.h2_props is not None:
-            try:
-                if is_helium:
-                    props = self.h2_props.get_helium_properties(T, P)
-                else:
-                    props = self.h2_props.get_properties(T, P, x)
-                return props
-            except:
-                pass
+        # Pre-calculate geometric constants
+        geo_factor = (self.L_elem / Dh) * 0.5
 
-        # Simplified fallback properties
-        if is_helium:
-            return {
-                'h': 5200 * (T - 4.0),
-                'rho': P / (2077 * T),
-                'cp': 5200,
-                'mu': 1e-5,
-                'lambda': 0.15
-            }
+        if not is_cold:
+            # === HOT STREAM (Forward: 0 -> N) ===
+            # Vectorized property fetch (if supported) or fast loop
+            # Note: We loop sequentially for Pressure calculation dependence
+
+            for i in range(N):
+                # 1. Properties
+                p_curr = self.h2_props.get_properties(T[i], P[i], x[i])
+                props_list[i] = p_curr
+
+                # 2. Hydraulics (Calculate for NEXT node i+1)
+                if i < N - 1:
+                    rho = p_curr['rho']
+                    u = mass_flow / (rho * Ac)
+                    Re = rho * u * Dh / p_curr['mu']
+                    Pr = p_curr['mu'] * p_curr['cp'] / p_curr['lambda']
+
+                    Nu, f = TPMSCorrelations.get_correlations(tpms_type, Re, Pr, 'Gas')
+
+                    # Store h_coeff for the element i
+                    h_coeffs[i] = 1.2 * Nu * p_curr['lambda'] / Dh
+
+                    # Forward Pressure Drop: P[i+1] = P[i] - dP
+                    dP = f * geo_factor * rho * u ** 2
+                    P_new[i + 1] = P_new[i] - dP
+
         else:
-            return {
-                'h': 14000 * (T - 14.0),
-                'rho': P / (4124 * T),
-                'cp': 14000,
-                'mu': 1e-5,
-                'lambda': 0.1,
-                'Delta_h': 500e3
-            }
+            # === COLD STREAM (Backward: N -> 0) ===
+            # We iterate backwards to propagate pressure correctly
+
+            for i in range(N - 1, -1, -1):
+                # 1. Properties
+                p_curr = self.h2_props.get_helium_properties(T[i], P[i])
+                props_list[i] = p_curr
+
+                # 2. Hydraulics (Calculate for PREVIOUS node i-1)
+                if i > 0:
+                    rho = p_curr['rho']
+                    u = mass_flow / (rho * Ac)
+                    Re = rho * u * Dh / p_curr['mu']
+                    Pr = p_curr['mu'] * p_curr['cp'] / p_curr['lambda']
+
+                    Nu, f = TPMSCorrelations.get_correlations(tpms_type, Re, Pr, 'Gas')
+
+                    # Store h_coeff for element i-1 (which connects nodes i-1 and i)
+                    h_coeffs[i - 1] = Nu * p_curr['lambda'] / Dh
+
+                    # Backward Pressure Drop: P[i-1] = P[i] - dP (Flow moves from i to i-1)
+                    # Note: Since flow is against index, P[i] is upstream, P[i-1] is downstream
+                    dP = f * geo_factor * rho * u ** 2
+                    P_new[i - 1] = P_new[i] - dP
+
+        return props_list, h_coeffs, P_new
 
     def _get_heat_transfer_coefficient(self, Re, Pr, tpms_type, Dh, lambda_f, is_hot=True):
         """Calculate heat transfer coefficient using TPMS correlations"""
@@ -404,6 +468,71 @@ class TPMSHeatExchangerImproved:
             h *= self.config['catalyst'].get('enhancement', 1.2)
 
         return h, Nu
+
+    def _compute_energy_balance(self, props_h, props_c, h_coeff_h, h_coeff_c, H_h_old, H_c_old, relax):
+        """
+        Solves Energy Balance using Enthalpy Relaxation.
+        """
+        mh = self.config['operating']['mh']
+        mc = self.config['operating']['mc']
+
+        # 1. Calculate U and Heat Flux
+        Q_calc = np.zeros(self.N_elements)
+
+        for i in range(self.N_elements):
+            R_total = (1 / h_coeff_h[i]) + (self.wall_thickness / self.k_wall) + (1 / h_coeff_c[i])
+            U = 1 / R_total
+
+            # Driving Force
+            Th_avg = 0.5 * (self.Th[i] + self.Th[i + 1])
+            Tc_avg = 0.5 * (self.Tc[i] + self.Tc[i + 1])
+            Q_calc[i] = U * self.A_elem * (Th_avg - Tc_avg)
+
+        # 2. Enthalpy Balance (Calculate TARGET Enthalpies)
+        H_h_target = np.zeros(self.N_elements + 1)
+        H_c_target = np.zeros(self.N_elements + 1)
+
+        # Hot (Forward): H[i+1] = H[i] - Q/m
+        H_h_target[0] = props_h[0]['h']
+        for i in range(self.N_elements):
+            H_h_target[i + 1] = H_h_target[i] - Q_calc[i] / mh
+
+        # Cold (Backward): H[i] = H[i+1] + Q/m
+        H_c_target[-1] = props_c[-1]['h']
+        for i in range(self.N_elements - 1, -1, -1):
+            H_c_target[i] = H_c_target[i + 1] + Q_calc[i] / mc
+
+        # 3. Apply Enthalpy Relaxation
+        # Instead of relaxing T, we relax H. This is much more stable near phase transitions.
+        H_h_new = H_h_old + relax * (H_h_target - H_h_old)
+        H_c_new = H_c_old + relax * (H_c_target - H_c_old)
+
+        # 4. Invert Enthalpy to get Temperature (H -> T)
+        Th_new = self.Th.copy()
+        Tc_new = self.Tc.copy()
+
+        def get_T_from_H(H_target, P, x, T_guess, is_helium=False):
+            # Simple wrapper for fsolve - can be replaced by Tabular lookup later
+            def res(T):
+                if is_helium:
+                    return self.h2_props.get_helium_properties(T, P)['h'] - H_target
+                else:
+                    return self.h2_props.get_properties(T, P, "hydrogen mixture", x)['h'] - H_target
+
+            try:
+                sol = fsolve(res, T_guess, xtol=1e-4)
+                return float(sol[0])
+            except Exception:
+                return T_guess
+
+        # Update T arrays based on Relaxed Enthalpy
+        for i in range(len(H_h_new)):
+            Th_new[i] = get_T_from_H(H_h_new[i], self.Ph[i], self.xh[i], self.Th[i], False)
+
+        for i in range(len(H_c_new)):
+            Tc_new[i] = get_T_from_H(H_c_new[i], self.Pc[i], None, self.Tc[i], True)
+
+        return Th_new, Tc_new, Q_calc, H_h_new, H_c_new
 
     def _get_friction_factor(self, Re, tpms_type):
         """Calculate friction factor using TPMS correlations"""
@@ -427,250 +556,94 @@ class TPMSHeatExchangerImproved:
         dP = f * (L / Dh) * (rho * u ** 2 / 2)
         return dP, f, Re
 
-    def solve(self, max_iter=500, tolerance=1e-3):
-        """Main solver loop with improved robustness, Q damping, and Q error tracking"""
-        print("=" * 100)
-        print("TPMS Heat Exchanger - IMPROVED SOLVER WITH Q ERROR TRACKING")
-        print("=" * 100)
-        print(f"Initial Q damping factor: {self.Q_damping_factor:.3f}")
-        print(f"Adaptive damping: {'Enabled' if self.adaptive_damping else 'Disabled'}")
+    def solve(self, max_iter=500, tolerance=1e-4):
+        print("=" * 70)
+        print("TPMS Heat Exchanger Solver (Split & Enthalpy Relaxation)")
+        print("=" * 70)
 
         mh = self.config['operating']['mh']
         mc = self.config['operating']['mc']
 
-        # Storage
-        Q = np.zeros(self.N_elements)
-        Q_raw = np.zeros(self.N_elements)  # Undamped heat load
-        dP_hot = np.zeros(self.N_elements)
-        dP_cold = np.zeros(self.N_elements)
+        # Initialize Enthalpy Arrays for Relaxation
+        N = self.N_elements + 1
+        H_h_curr = np.zeros(N)
+        H_c_curr = np.zeros(N)
 
-        # Initialize Q_prev for first iteration
-        if self.Q_prev is None:
-            self.Q_prev = np.zeros(self.N_elements)
-
-        # Adaptive damping parameters
-        Q_oscillation_history = []
-        damping_increase_threshold = 0.05
-        damping_decrease_threshold = 0.01
-
-        start_time = time.time()
+        # Initial H guess
+        for i in range(N):
+            H_h_curr[i] = self.h2_props.get_properties(self.Th[i], self.Ph[i], self.xh[i])['h']
+            H_c_curr[i] = self.h2_props.get_helium_properties(self.Tc[i], self.Pc[i])['h']
 
         for iteration in range(max_iter):
-            # Store old values for error calculation
-            Th_old = self.Th.copy()
-            Tc_old = self.Tc.copy()
-            Ph_old = self.Ph.copy()
-            Pc_old = self.Pc.copy()
+            Th_old, Tc_old = self.Th.copy(), self.Tc.copy()
 
-            # Store Q from previous step explicitly for error calc before update
-            Q_old_iter = self.Q_prev.copy()
+            # 1. Physics & Hydraulics
+            props_h, h_h, self.Ph = self._update_stream_physics(
+                self.Th, self.Ph, self.xh, mh, self.Ac_hot, self.Dh_hot, self.TPMS_hot, is_cold=False
+            )
+            props_c, h_c, self.Pc = self._update_stream_physics(
+                self.Tc, self.Pc, None, mc, self.Ac_cold, self.Dh_cold, self.TPMS_cold, is_cold=True
+            )
 
-            # --- Element-wise calculations ---
-            for i in range(self.N_elements):
-                # Average properties in element
-                T_h_avg = 0.5 * (self.Th[i] + self.Th[i + 1])
-                T_c_avg = 0.5 * (self.Tc[i] + self.Tc[i + 1])
-                P_h_avg = 0.5 * (self.Ph[i] + self.Ph[i + 1])
-                P_c_avg = 0.5 * (self.Pc[i] + self.Pc[i + 1])
-                x_h_avg = 0.5 * (self.xh[i] + self.xh[i + 1])
+            # 2. Kinetics
+            self.xh = self._ortho_para_conversion(self.Th, self.Ph, self.xh, mh)
 
-                # Get properties
-                props_h = self._safe_get_prop(T_h_avg, P_h_avg, x_h_avg, False)
-                props_c = self._safe_get_prop(T_c_avg, P_c_avg, None, True)
+            # 3. Energy Balance (with Enthalpy Relaxation)
+            relax = min(0.5, 0.05 + 0.01 * iteration) if iteration > 10 else 0.05
 
-                # Velocities
-                u_h = mh / (props_h['rho'] * self.Ac_hot)
-                u_c = mc / (props_c['rho'] * self.Ac_cold)
+            self.Th, self.Tc, Q, H_h_curr, H_c_curr = self._compute_energy_balance(
+                props_h, props_c, h_h, h_c, H_h_curr, H_c_curr, relax
+            )
 
-                # Prandtl numbers
-                Pr_h = props_h['mu'] * props_h['cp'] / props_h['lambda']
-                Pr_c = props_c['mu'] * props_c['cp'] / props_c['lambda']
+            # 4. Convergence
+            err = np.max(np.abs(self.Th - Th_old)) + np.max(np.abs(self.Tc - Tc_old))
 
-                # Reynolds numbers and heat transfer coefficients
-                Re_h = props_h['rho'] * u_h * self.Dh_hot / props_h['mu']
-                Re_c = props_c['rho'] * u_c * self.Dh_cold / props_c['mu']
-
-                h_h, Nu_h = self._get_heat_transfer_coefficient(
-                    Re_h, Pr_h, self.TPMS_hot, self.Dh_hot, props_h['lambda'], True)
-                h_c, Nu_c = self._get_heat_transfer_coefficient(
-                    Re_c, Pr_c, self.TPMS_cold, self.Dh_cold, props_c['lambda'], False)
-
-                # Overall heat transfer coefficient
-                U = 1 / (1 / h_h + self.wall_thickness / self.k_wall + 1 / h_c)
-
-                # Calculate RAW heat transfer (undamped)
-                Q_raw[i] = U * self.A_elem * (T_h_avg - T_c_avg)
-
-                # Pressure drops
-                dP_hot[i], _, _ = self._calculate_pressure_drop(
-                    props_h['rho'], u_h, props_h['mu'],
-                    self.L_elem, self.Dh_hot, self.TPMS_hot)
-
-                dP_cold[i], _, _ = self._calculate_pressure_drop(
-                    props_c['rho'], u_c, props_c['mu'],
-                    self.L_elem, self.Dh_cold, self.TPMS_cold)
-
-            # --- Apply Q Damping ---
-            if iteration == 0:
-                Q = Q_raw.copy() * 0.1
-            else:
-                alpha = self.Q_damping_factor
-                Q = alpha * Q_raw + (1 - alpha) * self.Q_prev
-
-            # --- Q Oscillation & Damping Logic ---
-            Q_total_current = np.sum(Q)
-            Q_total_prev = np.sum(self.Q_prev) if iteration > 0 else Q_total_current
-            Q_oscillation = abs(Q_total_current - Q_total_prev) / max(abs(Q_total_current), 1e-10)
-            Q_oscillation_history.append(Q_oscillation)
-
-            if self.adaptive_damping and iteration > 10:
-                recent_oscillation = np.mean(Q_oscillation_history[-5:])
-                if recent_oscillation > damping_increase_threshold:
-                    self.Q_damping_factor = max(0.1, self.Q_damping_factor * 0.9)
-                elif recent_oscillation < damping_decrease_threshold and self.Q_damping_factor < 0.8:
-                    self.Q_damping_factor = min(0.9, self.Q_damping_factor * 1.05)
-
-            # Update Q history
-            self.Q_prev = Q.copy()
-            self._last_Q = Q.copy()
-
-            # --- Update Pressures ---
-            for i in range(self.N_elements):
-                self.Ph[i + 1] = self.Ph[i] - dP_hot[i]
-                self.Pc[i] = self.Pc[i + 1] + dP_cold[self.N_elements - i - 1]
-
-            # --- Update Enthalpies ---
-            hh = np.zeros(self.N_elements + 1)
-            hc = np.zeros(self.N_elements + 1)
-
-            hh[0] = self._safe_get_prop(self.config['operating']['Th_in'], self.Ph[0], self.xh[0], False)['h']
-            for i in range(self.N_elements):
-                hh[i + 1] = hh[i] - Q[i] / mh
-
-            hc[-1] = self._safe_get_prop(self.config['operating']['Tc_in'], self.Pc[-1], None, True)['h']
-            for i in range(self.N_elements - 1, -1, -1):
-                hc[i] = hc[i + 1] + Q[i] / mc
-
-            # --- Update Temperatures (Hot) ---
-            for i in range(len(hh)):
-                def res_h(T):
-                    return self._safe_get_prop(T, self.Ph[i], self.xh[i], False)['h'] - hh[i]
-
-                guess = np.clip(self.Th[i], 14.0, 400.0)
-                try:
-                    sol = fsolve(res_h, guess, xtol=1e-3)
-                    self.Th[i] = 0.8 * self.Th[i] + 0.2 * np.clip(sol[0], 14.0, 400.0)
-                except:
-                    pass
-
-            # --- Update Temperatures (Cold) ---
-            for i in range(len(hc)):
-                def res_c(T):
-                    return self._safe_get_prop(T, self.Pc[i], None, True)['h'] - hc[i]
-
-                guess = np.clip(self.Tc[i], 4.0, 400.0)
-                try:
-                    sol = fsolve(res_c, guess, xtol=1e-3)
-                    self.Tc[i] = 0.8 * self.Tc[i] + 0.2 * np.clip(sol[0], 4.0, 400.0)
-                except:
-                    pass
-
-            # Physics Check
-            if iteration > 5:
-                for i in range(self.N_elements):
-                    if self.Tc[i + 1] > self.Tc[i]:
-                        self.Tc[i + 1] = self.Tc[i] - 1e-4
-
-            # --- Ortho-Para Conversion ---
-            if self.h2_props is not None:
-                try:
-                    xh_new = self._ortho_para_conversion(self.Th, self.Ph, self.xh, mh)
-                    self.xh = self.xh + 0.1 * (xh_new - self.xh)
-                except:
-                    pass
-            else:
-                self.xh = np.linspace(self.xh[0], 0.9, len(self.xh))
-
-            # --- ERROR CALCULATION WITH Q ---
-            err_T = np.max(np.abs(self.Th - Th_old)) + np.max(np.abs(self.Tc - Tc_old))
-            err_P = np.max(np.abs(self.Ph - Ph_old)) + np.max(np.abs(self.Pc - Pc_old))
-
-            # Calculate Q error (max absolute difference in Watts)
-            err_Q = np.max(np.abs(Q - Q_old_iter))
-
-            # Total Error: Combine T, P (scaled), and Q (scaled)
-            # Scaling Q by 1e-4 so 10W error ~ 0.001 total error impact
-            err = err_T + (err_P * 1e-6) + (err_Q * 1e-4)
-
-            # --- Stability Enforcement (Replaces Monotonicity) ---
-            # PREVENTS: Temperature Crossover (Th < Tc)
-            # ALLOWS: Exothermic heating of hot stream
-
-            # if iteration > 5 and err > 1:  # Allow initial 5 iterations to settle
-            #     min_approach = max(abs(err_T), 0.01)  # Minimum temp difference (K)
-            #
-            #     for i in range(len(self.Th)):
-            #         # Check if Hot drops below Cold (plus margin)
-            #         if self.Th[i] < self.Tc[i] + min_approach:
-            #             # We have a crossover! Force them apart.
-            #             # Calculate the average to reset them to a physical state
-            #             T_avg = 0.5 * (self.Th[i] + self.Tc[i])
-            #
-            #             # Push Hot slightly above, Cold slightly below
-            #             self.Th[i] = T_avg + 0.5 * min_approach
-            #             self.Tc[i] = T_avg - 0.5 * min_approach
-
-            # Update tracker
-            self.tracker.update(iteration + 1, err, self, self.Q_damping_factor)
-
-            # Print status every 20 iterations
-            if (iteration + 1) % 20 == 0:
-                Q_total = np.sum(Q)
-                print(f"Iter {iteration + 1:3d} | Err Tot: {err:.4f} | "
-                      f"Err T: {err_T:.4f} | Err P: {err_P:.1e} | Err Q: {err_Q:.4f} | "
-                      f"Q: {Q_total:.1f}W")
+            if (iteration + 1) % 10 == 0:
+                print(f"Iter {iteration + 1:3d} | Err: {err:.4f} | Q: {np.sum(Q):.2f} W")
 
             if err < tolerance:
-                elapsed = time.time() - start_time
-                print(f"\n✓ CONVERGED in {iteration + 1} iterations ({elapsed:.2f} s)")
-                print(f"  Final Errors -> T: {err_T:.2e}, P: {err_P:.2e}, Q: {err_Q:.2e}")
-                self._print_results(Q, dP_hot, dP_cold)
+                print(f"\n*** CONVERGED in {iteration + 1} iterations ***")
+                self._print_results(Q)
                 return True
 
-        print("\n⚠ Max iterations reached")
-        self._print_results(Q, dP_hot, dP_cold)
+        print("Max iterations reached.")
+        self._print_results(Q)
         return False
+
     def _ortho_para_conversion(self, Th, Ph, xh, mh):
-        """Wilhelmsen Retuned Kinetics"""
+        """Wilhelmsen Returned Kinetics"""
         xh_new = np.zeros_like(xh)
         xh_new[0] = xh[0]
-        Tc_H2 = 32.938; Pc_H2 = 1.284e6
+        Tc_H2 = 32.938
+        Pc_H2 = 1.284e6
 
         for i in range(self.N_elements):
-            T_avg = 0.5 * (Th[i] + Th[i+1])
-            P_avg = 0.5 * (Ph[i] + Ph[i+1])
-            x_avg = 0.5 * (xh[i] + xh[i+1])
+            T_avg = 0.5 * (Th[i] + Th[i + 1])
+            P_avg = 0.5 * (Ph[i] + Ph[i + 1])
+            x_avg = 0.5 * (xh[i] + xh[i + 1])
             x_eq = self.h2_props.get_equilibrium_fraction(T_avg)
 
-            props = self._safe_get_prop(T_avg, P_avg, x_avg, False)
-            rho = props['rho']; C_H2 = rho / 0.002016
+            props = self.h2_props.get_properties(T_avg, P_avg, x_avg)
+            rho = props['rho']
+            C_H2 = rho / 0.002016
 
-            kw = 34.76 - 220.9*(T_avg/Tc_H2) - 20.65*(P_avg/Pc_H2)
+            kw = 34.76 - 220.9 * (T_avg / Tc_H2) - 20.65 * (P_avg / Pc_H2)
 
             try:
-                term1 = (x_avg/x_eq)**1.3246
-                term2 = (1-x_eq)/(1-x_avg+1e-9)
+                term1 = (x_avg / x_eq) ** 1.3246
+                term2 = (1 - x_eq) / (1 - x_avg + 1e-9)
                 val = term1 * term2
-                rate = (kw/C_H2) * np.log(val) if val > 0 else 0
-            except: rate = 0
+                rate = (kw / C_H2) * np.log(val) if val > 0 else 0
+            except Exception:
+                rate = 0
 
             u = mh / (rho * self.Ac_hot)
             tau = self.L_elem / u
-            xh_new[i+1] = np.clip(xh[i] + rate*tau, 0.0, 1.0)
+            xh_new[i + 1] = np.clip(xh[i] + rate * tau, 0.0, 1.0)
 
         return xh_new
 
-    def _print_results(self, Q, dP_hot, dP_cold):
+    def _print_results(self, Q):
         """Print comprehensive results"""
         print("=" * 70)
         print("RESULTS - Thermo-Hydraulic Performance")
@@ -715,17 +688,17 @@ class TPMSHeatExchangerImproved:
                     print(f"  Conversion efficiency: {eff:.2f}%")
                 else:
                     print(f"  Conversion efficiency: N/A (already at equilibrium)")
-            except:
+            finally:
                 pass
 
         # Energy balance check (FIXED)
         try:
-            h_h_in = self._safe_get_prop(self.Th[0], self.Ph[0], self.xh[0], False)['h']
-            h_h_out = self._safe_get_prop(self.Th[-1], self.Ph[-1], self.xh[-1], False)['h']
+            h_h_in = self.h2_props.get_properties(self.Th[0], self.Ph[0], self.xh[0])['h']
+            h_h_out = self.h2_props.get_properties(self.Th[-1], self.Ph[-1], self.xh[-1])['h']
             Q_hot = self.config['operating']['mh'] * (h_h_in - h_h_out)
 
-            h_c_in = self._safe_get_prop(self.Tc[-1], self.Pc[-1], None, True)['h']
-            h_c_out = self._safe_get_prop(self.Tc[0], self.Pc[0], None, True)['h']
+            h_c_in = self.h2_props.get_helium_properties(self.Tc[-1], self.Pc[-1])['h']
+            h_c_out = self.h2_props.get_helium_properties(self.Tc[0], self.Pc[0])['h']
             Q_cold = self.config['operating']['mc'] * (h_c_out - h_c_in)
 
             imbalance = abs(Q_hot - Q_cold) / max(abs(Q_hot), abs(Q_cold)) * 100
@@ -742,6 +715,89 @@ class TPMSHeatExchangerImproved:
             print(f"\nEnergy Balance: Could not calculate - {e}")
 
         print("=" * 70)
+
+    def get_hot_stream_properties(self, position_idx=None):
+        """Get properties for hot stream at specified position(s)"""
+        if position_idx is None:
+            # Get properties for all positions
+            props = []
+            for i in range(len(self.Th)):
+                prop = self.h2_props.get_properties(self.Th[i], self.Ph[i], self.xh[i])
+                props.append(prop)
+            return props
+        else:
+            # Get properties for specific position
+            if isinstance(position_idx, (list, np.ndarray)):
+                props = []
+                for idx in position_idx:
+                    prop = self.h2_props.get_properties(self.Th[idx], self.Ph[idx], self.xh[idx])
+                    props.append(prop)
+                return props
+            else:
+                return self.h2_props.get_properties(self.Th[position_idx], self.Ph[position_idx], self.xh[position_idx])
+
+    def get_cold_stream_properties(self, position_idx=None):
+        """Get properties for cold stream at specified position(s)"""
+        if position_idx is None:
+            # Get properties for all positions
+            props = []
+            for i in range(len(self.Tc)):
+                prop = self.h2_props.get_helium_properties(self.Tc[i], self.Pc[i])
+                props.append(prop)
+            return props
+        else:
+            # Get properties for specific position
+            if isinstance(position_idx, (list, np.ndarray)):
+                props = []
+                for idx in position_idx:
+                    prop = self.h2_props.get_helium_properties(self.Tc[idx], self.Pc[idx])
+                    props.append(prop)
+                return props
+            else:
+                return self.h2_props.get_helium_properties(self.Tc[position_idx], self.Pc[position_idx])
+
+    def get_hot_stream_effectiveness(self):
+        """Calculate effectiveness of hot stream based on actual vs. maximum possible temperature change"""
+        Th_in, Th_out = self.Th[0], self.Th[-1]
+        Tc_in, Tc_out = self.Tc[-1], self.Tc[0]  # Note: cold stream flows opposite direction
+        
+        # Actual heat transferred
+        Q_actual = self.config['operating']['mh'] * (self.get_enthalpy_at_position('hot', 0) - 
+                                                     self.get_enthalpy_at_position('hot', -1))
+        
+        # Maximum possible heat transfer (if cold fluid outlet equals hot inlet)
+        # For counterflow heat exchanger: Q_max = C_min * (Th_in - Tc_in)
+        C_hot = self.get_average_heat_capacity('hot')
+        C_cold = self.get_average_heat_capacity('cold')
+        C_min = min(C_hot, C_cold)
+        
+        Q_max = C_min * (Th_in - Tc_in) if C_hot <= C_cold else C_min * (Th_in - Tc_in)
+        
+        effectiveness = Q_actual / Q_max if Q_max != 0 else 0
+        return effectiveness
+
+    def get_average_heat_capacity(self, stream_type):
+        """Calculate average heat capacity for specified stream"""
+        if stream_type == 'hot':
+            avg_T = np.mean(self.Th)
+            avg_P = np.mean(self.Ph)
+            avg_x = np.mean(self.xh)
+            prop = self.h2_props.get_properties(avg_T, avg_P, avg_x)
+            return self.config['operating']['mh'] * prop['cp']
+        else:  # cold
+            avg_T = np.mean(self.Tc)
+            avg_P = np.mean(self.Pc)
+            prop = self.h2_props.get_helium_properties(avg_T, avg_P)
+            return self.config['operating']['mc'] * prop['cp']
+
+    def get_enthalpy_at_position(self, stream_type, pos_idx):
+        """Get enthalpy at specific position for specified stream"""
+        if stream_type == 'hot':
+            prop = self.h2_props.get_properties(self.Th[pos_idx], self.Ph[pos_idx], self.xh[pos_idx])
+            return prop['h']
+        else:  # cold
+            prop = self.h2_props.get_helium_properties(self.Tc[pos_idx], self.Pc[pos_idx])
+            return prop['h']
 
 
 def create_default_config():
@@ -787,6 +843,16 @@ def create_default_config():
     }
 
 
+# Set plot style
+plt.rcParams['font.family'] = 'Times New Roman'
+plt.rcParams['font.size'] = 14
+plt.rcParams['axes.labelsize'] = 16
+plt.rcParams['axes.titlesize'] = 16
+plt.rcParams['xtick.labelsize'] = 14
+plt.rcParams['ytick.labelsize'] = 14
+plt.rcParams['legend.fontsize'] = 14
+plt.rcParams['figure.dpi'] = 100
+
 if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("TPMS HEAT EXCHANGER - IMPROVED VERSION")
@@ -800,6 +866,21 @@ if __name__ == "__main__":
 
     # Solve
     converged = he.solve()
+
+    # Additional analysis using new stream-specific methods
+    print("\nAdditional Analysis using Stream-Specific Methods:")
+    print(f"Hot stream effectiveness: {he.get_hot_stream_effectiveness():.4f}")
+    
+    # Print some properties at inlet and outlet
+    hot_inlet_props = he.get_hot_stream_properties(0)
+    hot_outlet_props = he.get_hot_stream_properties(-1)
+    cold_inlet_props = he.get_cold_stream_properties(0)
+    cold_outlet_props = he.get_cold_stream_properties(-1)
+    
+    print(f"Hot inlet: T={he.Th[0]:.2f}K, P={he.Ph[0]/1e6:.3f}MPa, x_para={he.xh[0]:.4f}, h={hot_inlet_props['h']:.0f}J/kg")
+    print(f"Hot outlet: T={he.Th[-1]:.2f}K, P={he.Ph[-1]/1e6:.3f}MPa, x_para={he.xh[-1]:.4f}, h={hot_outlet_props['h']:.0f}J/kg")
+    print(f"Cold inlet: T={he.Tc[0]:.2f}K, P={he.Pc[0]/1e6:.3f}MPa, h={cold_inlet_props['h']:.0f}J/kg")
+    print(f"Cold outlet: T={he.Tc[-1]:.2f}K, P={he.Pc[-1]/1e6:.3f}MPa, h={cold_outlet_props['h']:.0f}J/kg")
 
     # Visualize
     vis = TPMSVisualizer(he)

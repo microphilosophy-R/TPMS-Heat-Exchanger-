@@ -674,7 +674,7 @@ class TPMSHeatExchangerImproved:
             # --- Ortho-Para Conversion ---
             if self.h2_props is not None:
                 try:
-                    xh_new = self._ortho_para_conversion()
+                    xh_new = self._ortho_para_conversion(self.Th, self.Ph, self.xh, mh)
                     self.xh = self.xh + 0.1 * (xh_new - self.xh)
                 except:
                     pass
@@ -730,26 +730,33 @@ class TPMSHeatExchangerImproved:
         print("\n⚠ Max iterations reached")
         self._print_results(Q, dP_hot, dP_cold)
         return False
-
-    def _ortho_para_conversion(self):
-        """Simplified kinetics"""
-        xh_new = np.zeros_like(self.xh)
-        xh_new[0] = self.xh[0]
-
-        x_eq_func = self.h2_props.get_equilibrium_fraction
+    def _ortho_para_conversion(self, Th, Ph, xh, mh):
+        """Wilhelmsen Retuned Kinetics"""
+        xh_new = np.zeros_like(xh)
+        xh_new[0] = xh[0]
+        Tc_H2 = 32.938; Pc_H2 = 1.284e6
 
         for i in range(self.N_elements):
-            T_avg = 0.5 * (self.Th[i] + self.Th[i + 1])
-            x_eq = x_eq_func(T_avg)
+            T_avg = 0.5 * (Th[i] + Th[i+1])
+            P_avg = 0.5 * (Ph[i] + Ph[i+1])
+            x_avg = 0.5 * (xh[i] + xh[i+1])
+            x_eq = self.h2_props.get_equilibrium_fraction(T_avg)
 
-            k_rate = 0.2
-            mh = self.config['operating']['mh']
-            props = self._safe_get_prop(T_avg, self.Ph[i], self.xh[i], False)
-            u = mh / (props['rho'] * self.Ac_hot)
+            props = self._safe_get_prop(T_avg, P_avg, x_avg, False)
+            rho = props['rho']; C_H2 = rho / 0.002016
+
+            kw = 34.76 - 220.9*(T_avg/Tc_H2) - 20.65*(P_avg/Pc_H2)
+
+            try:
+                term1 = (x_avg/x_eq)**1.3246
+                term2 = (1-x_eq)/(1-x_avg+1e-9)
+                val = term1 * term2
+                rate = (kw/C_H2) * np.log(val) if val > 0 else 0
+            except: rate = 0
+
+            u = mh / (rho * self.Ac_hot)
             tau = self.L_elem / u
-
-            dx = k_rate * (x_eq - self.xh[i]) * tau
-            xh_new[i + 1] = np.clip(self.xh[i] + dx, 0.0, 1.0)
+            xh_new[i+1] = np.clip(xh[i] + rate*tau, 0.0, 1.0)
 
         return xh_new
 

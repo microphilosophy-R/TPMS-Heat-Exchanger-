@@ -34,7 +34,6 @@ plt.rcParams['ytick.labelsize'] = 14
 plt.rcParams['legend.fontsize'] = 14
 plt.rcParams['figure.dpi'] = 100
 
-
 class ConvergenceTracker:
     """Track and visualize convergence history"""
 
@@ -237,92 +236,6 @@ class ConvergenceTracker:
         df.to_csv(filepath, index=False)
         print(f"✓ Convergence data exported: {filepath}")
 
-
-class RobustTemperatureSolver:
-    """Multi-stage temperature solver with fallback methods"""
-
-    @staticmethod
-    def solve(target_h, P, x, is_helium, prop_func, T_guess, T_bounds=(4.0, 400.0)):
-        """
-        Solve for temperature given enthalpy using multi-stage approach:
-        1. Try fsolve with good initial guess
-        2. If fails, try root with hybr method
-        3. If fails, try bounded optimization
-        """
-        # Stage 1: Physical bounds for initial guess
-        T_min, T_max = T_bounds
-        if is_helium:
-            T_min = max(T_min, 4.0)
-        else:
-            T_min = max(T_min, 14.0)
-
-        T_guess = np.clip(T_guess, T_min, T_max)
-
-        def residual(T):
-            try:
-                props = prop_func(T, P, x, is_helium)
-                return props['h'] - target_h
-            except:
-                return 1e10  # Large penalty for failure
-
-        # Stage 1: fsolve (fastest when it works)
-        try:
-            sol = fsolve(residual, T_guess, full_output=True, xtol=1e-6)
-            T_new = sol[0][0]
-            if sol[2] == 1 and T_min <= T_new <= T_max:  # Check if converged and in bounds
-                # Verify the solution
-                if abs(residual(T_new)) < 100:  # Within 100 J/kg
-                    return T_new
-        except:
-            pass
-
-        # Stage 2: root with method='hybr' (more robust)
-        try:
-            sol = root(residual, T_guess, method='hybr')
-            if sol.success:
-                T_new = sol.x[0]
-                if T_min <= T_new <= T_max and abs(residual(T_new)) < 100:
-                    return T_new
-        except:
-            pass
-
-        # Stage 3: Bounded optimization (slowest but most robust)
-        try:
-            def objective(T):
-                return abs(residual(T))
-
-            result = minimize_scalar(objective, bounds=(T_min, T_max), method='bounded')
-            if result.success and result.fun < 100:
-                return result.x
-        except:
-            pass
-
-        # Stage 4: Binary search (last resort)
-        try:
-            T_low, T_high = T_min, T_max
-            for _ in range(50):  # Max 50 iterations
-                T_mid = (T_low + T_high) / 2
-                res = residual(T_mid)
-
-                if abs(res) < 100:
-                    return T_mid
-
-                # Check direction
-                if abs(residual(T_low)) < abs(res):
-                    T_high = T_mid
-                else:
-                    T_low = T_mid
-
-            # Return best guess
-            return T_mid
-        except:
-            pass
-
-        # Ultimate fallback: return clamped guess
-        print(f"⚠ Temperature solver failed at h={target_h:.0f}, using guess {T_guess:.2f}K")
-        return T_guess
-
-
 class TPMSHeatExchangerImproved:
     """
     Improved TPMS Heat Exchanger Solver
@@ -354,9 +267,6 @@ class TPMSHeatExchangerImproved:
 
         # Initialize convergence tracker
         self.tracker = ConvergenceTracker()
-
-        # Initialize temperature solver
-        self.T_solver = RobustTemperatureSolver()
 
         # Initialize relaxing for temperature
         self.relax = config['solver'].get('relax', 0.15)

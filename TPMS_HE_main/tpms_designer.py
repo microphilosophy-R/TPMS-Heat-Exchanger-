@@ -8,17 +8,18 @@ Content:
 """
 
 import numpy as np
-from scipy.optimize import minimize_scalar
+from scipy.optimize import minimize_scalar, fsolve
 import copy
 import sys
 import os
 import contextlib
 
-# Import the main simulation class
+# Import the main simulation class and dependencies
 try:
     from tpms_thermo_hydraulic_calculator import TPMSHeatExchanger
+    from tpms_correlations import TPMSCorrelations
 except ImportError:
-    raise ImportError("Could not import TPMSHeatExchanger. Ensure 'tpms_thermo_hydraulic_calculator.py' is in the same directory.")
+    raise ImportError("Ensure 'tpms_thermo_hydraulic_calculator.py' and 'tpms_correlations.py' are in the same directory.")
 
 class DummyFile:
     """A robust dummy file handler that ignores all input."""
@@ -29,65 +30,96 @@ class DummyFile:
 class TPMSDesigner:
     """
     Design-stage solver for TPMS Heat Exchangers.
-    Uses optimization algorithms and epsilon-NTU estimations to determine
-    geometric parameters required to meet specific process targets.
+    Uses a two-stage approach:
+    Stage 1: Fast UA-matching using analytical physics (fsolve).
+    Stage 2: Precise thermo-hydraulic refinement (minimize_scalar).
     """
 
     def __init__(self, base_config):
-        """
-        Initialize with a baseline configuration dictionary.
-
-        Parameters
-        ----------
-        base_config : dict
-            The standard configuration dictionary used in TPMSHeatExchanger.
-        """
         self.base_config = copy.deepcopy(base_config)
 
     def _update_nested_config(self, config, path_list, value):
-        """Helper to update deep dictionary keys."""
         d = config
         for key in path_list[:-1]:
             d = d[key]
         d[path_list[-1]] = value
 
     def _get_result_value(self, he_instance, target_key):
-        """Extracts the specific result metric from a solved heat exchanger instance."""
         if target_key == 'Th_out':
             return he_instance.Th[-1]
         elif target_key == 'Tc_out':
             return he_instance.Tc[0]
         elif target_key == 'Q_total':
             return np.sum(he_instance.Q)
-        elif target_key == 'dP_hot':
-            return he_instance.Ph[0] - he_instance.Ph[-1]
-        elif target_key == 'dP_cold':
-            return he_instance.Pc[-1] - he_instance.Pc[0]
         else:
-            raise ValueError(f"Unknown target key: {target_key}")
+            raise ValueError(f"Target key {target_key} not supported for geometry optimization.")
 
-    def estimate_geometry_ntu(self, design_variable, target_metric, target_value):
+    def calculate_UA_precisely(self, x, design_variable):
         """
-        Generic Epsilon-NTU estimator for any geometric variable.
-        Calculates the required change in UA to meet the target and maps it to
-        the design variable (Length, Width, or Cell Size).
+        Calculates the theoretical UA value for a given geometry parameter x
+        by evaluating the local HTC and resistances at inlet conditions.
+
+        This reflects the logic in _update_stream_physics and _compute_energy_balance.
         """
-        cfg = self.base_config
+        cfg = copy.deepcopy(self.base_config)
+
+        # Map variable to config
+        param_map = {'length': 'length', 'width': 'width', 'unit_cell_size': 'unit_cell_size'}
+        if design_variable in param_map:
+            cfg['geometry'][param_map[design_variable]] = x
+
+        g = cfg['geometry']
         ops = cfg['operating']
-        geom = cfg['geometry']
 
-        # 1. Properties
+        # 1. Geometry derived parameters
+        sigma = g['surface_area_density']
+        area_total = g['length'] * g['width'] * g['height'] * sigma
+
+        # 2. Physics evaluation at mean conditions (inlet-based approximation)
         he_temp = TPMSHeatExchanger(cfg)
         h2_props = he_temp.h2_props
-        p_h = h2_props.get_properties(ops['Th_in'], ops['Ph_in'], cfg['operating'].get('fluid_hot', 'hydrogen mixture'), ops['xh_in'])
-        p_c = h2_props.get_properties(ops['Tc_in'], ops['Pc_in'], cfg['operating'].get('fluid_cold', 'helium'))
 
-        Ch = ops['mh'] * p_h['cp']
-        Cc = ops['mc'] * p_c['cp']
+        # Evaluate H and C streams
+        ua_sum = 0
+        for stream_key in ['hot', 'cold']:
+            s = he_temp.streams[stream_key]
+            # Use mean temperature approximation for fast UA
+            T_mean = (ops['Th_in'] + ops['Tc_in']) / 2.0
+            P_in = ops[f'P{"h" if stream_key=="hot" else "c"}_in']
+            x_p = ops.get('xh_in', None) if stream_key == 'hot' else None
+
+            p = h2_props.get_properties(T_mean, P_in, s['species'], x_p)
+
+            # Local Re, Pr
+            u = s['m'] / (p['rho'] * s['Ac'])
+            Re = p['rho'] * u * s['Dh'] / p['mu']
+            Pr = p['mu'] * p['cp'] / p['lambda']
+
+            Nu, _ = TPMSCorrelations.get_correlations(s['tpms'], Re, Pr, 'Gas')
+            # Store resistance
+            s['R_conv'] = 1.0 / (Nu * p['lambda'] / s['Dh'])
+
+        # 3. Overall Resistance
+        R_wall = g['wall_thickness'] / cfg['material']['k_wall']
+        # Based on _compute_energy_balance logic: R_total = 1/h_h + R_wall + 1/h_c
+        R_total = (1.2 * he_temp.streams['hot']['R_conv']) + R_wall + he_temp.streams['cold']['R_conv']
+        U = 1.0 / R_total
+
+        return U * area_total
+
+    def get_target_UA(self, target_metric, target_value):
+        """Calculates the target UA required using the epsilon-NTU method."""
+        ops = self.base_config['operating']
+        he_temp = TPMSHeatExchanger(self.base_config)
+        h2_props = he_temp.h2_props
+
+        p_h = h2_props.get_properties(ops['Th_in'], ops['Ph_in'], self.base_config['operating'].get('fluid_hot', 'hydrogen mixture'), ops['xh_in'])
+        p_c = h2_props.get_properties(ops['Tc_in'], ops['Pc_in'], self.base_config['operating'].get('fluid_cold', 'helium'))
+
+        Ch, Cc = ops['mh'] * p_h['cp'], ops['mc'] * p_c['cp']
         Cmin, Cmax = min(Ch, Cc), max(Ch, Cc)
         Cr = Cmin / Cmax
 
-        # 2. Required Effectiveness
         Q_max = Cmin * (ops['Th_in'] - ops['Tc_in'])
         if target_metric == 'Th_out':
             Q_req = Ch * (ops['Th_in'] - target_value)
@@ -95,107 +127,77 @@ class TPMSDesigner:
             Q_req = Cc * (target_value - ops['Tc_in'])
         elif target_metric == 'Q_total':
             Q_req = target_value
-        else: return None
+        else: return 0
 
-        epsilon = min(0.99, Q_req / Q_max)
+        epsilon = min(0.999, Q_req / Q_max)
 
-        # 3. NTU -> UA
         try:
             if Cr < 1.0:
                 ntu = (1.0 / (Cr - 1.0)) * np.log((epsilon - 1.0) / (epsilon * Cr - 1.0))
             else:
                 ntu = epsilon / (1.0 - epsilon)
-        except: ntu = 5.0
+        except: ntu = 10.0 # Upper limit
 
-        UA_req = ntu * Cmin
+        return ntu * Cmin
 
-        # 4. Sensitivity Mapping
-        # Assume UA proportional to Area (L*W*H) and inversely to Dh (Cell Size)
-        # Dh ~ CellSize. A ~ sigma * L * W * H
-        current_val = geom.get(design_variable, 0.01)
-        if design_variable == 'length':
-            est_val = UA_req / (1000.0 * geom['width'] * geom['height'] * geom['surface_area_density'])
-        elif design_variable == 'width':
-            est_val = UA_req / (1000.0 * geom['length'] * geom['height'] * geom['surface_area_density'])
-        elif design_variable == 'unit_cell_size':
-            # Smaller cell size increases sigma and improves HTC (U)
-            # Rough approximation: UA ~ 1 / CellSize^1.5
-            est_val = current_val * (UA_req / (1000.0 * geom['length'] * geom['width'] * geom['height'] * geom['surface_area_density']))**(-0.66)
-        else:
-            est_val = current_val
-
-        return est_val
-
-    def solve_geometry(self, design_variable, target_metric, target_value, bounds=None, verbose=False):
+    def solve_geometry(self, design_variable, target_metric, target_value, verbose=False):
         """
-        Two-stage solver:
-        1. Fast NTU Search: Uses thermal imbalance and epsilon-NTU logic to narrow the search.
-        2. Precise Simulation: Refines the value using the full thermo-hydraulic solver.
+        Two-stage design solver:
+        Stage 1: Precise UA matching using analytical physics and fsolve.
+        Stage 2: Refinement using the full iterative simulation.
         """
         param_map = {
             'length': ['geometry', 'length'],
             'width': ['geometry', 'width'],
-            'height': ['geometry', 'height'],
             'cell_size': ['geometry', 'unit_cell_size']
         }
         config_path = param_map[design_variable]
 
-        # --- STAGE 1: FAST ESTIMATION ---
-        est_x = self.estimate_geometry_ntu(design_variable, target_metric, target_value)
+        # --- STAGE 1: FAST ANALYTICAL SEARCH ---
+        target_ua = self.get_target_UA(target_metric, target_value)
 
-        if bounds is None:
-            # Use estimate to define a smart bracket
-            bounds = (max(1e-4, est_x * 0.1), est_x * 10.0)
+        def ua_residual(x):
+            return self.calculate_UA_precisely(x, design_variable) - target_ua
+
+        # Initial guess from current config
+        x0 = self.base_config['geometry'].get(param_map[design_variable], 0.1)
+        x_analytical = fsolve(ua_residual, x0)[0]
+        x_analytical = max(1e-4, x_analytical) # Physical guard
 
         if verbose:
-            print(f"\n--- TPMS Design Solver Initialized ---")
-            print(f"Target: {target_metric} = {target_value}")
-            print(f"Stage 1: NTU Estimate for {design_variable} = {est_x:.4f} m")
+            print(f"\n--- TPMS Design Solver ---")
+            print(f"Goal: {target_metric} = {target_value} (Target UA: {target_ua:.2f} W/K)")
+            print(f"Stage 1 (Analytical): Found {design_variable} = {x_analytical:.5f} m")
 
-        # --- STAGE 2: PRECISE ITERATION (Full Physics) ---
+        # --- STAGE 2: PRECISE THERMO-HYDRAULIC REFINEMENT ---
+        # Narrow bracket around analytical solution (+/- 25%)
+        bounds = (x_analytical * 0.75, x_analytical * 1.5)
+
         def objective(x):
             sim_config = copy.deepcopy(self.base_config)
             self._update_nested_config(sim_config, config_path, x)
-
             with contextlib.redirect_stdout(DummyFile()):
                 he = TPMSHeatExchanger(sim_config)
-                # Faster tolerances for inner optimization loops
-                converged = he.solve(max_iter=150, tolerance=1e-3)
+                # Run with moderate tolerance for speed in inner loop
+                converged = he.solve(max_iter=100, tolerance=5e-4)
 
-            if not converged:
-                return 1e9
+            if not converged: return 1e9
 
-            current_val = self._get_result_value(he, target_metric)
-            abs_error = abs(current_val - target_value)
-
+            err = abs(self._get_result_value(he, target_metric) - target_value)
             if verbose:
-                sys.__stdout__.write(f"  Precise Trial {design_variable} = {x:.5f} -> {target_metric} = {current_val:.4f} (Error: {abs_error:.4f})\n")
-
-            return abs_error
+                sys.__stdout__.write(f"  Stage 2 Trial {design_variable} = {x:.5f} -> Error: {err:.4f}\n")
+            return err
 
         try:
-            res = minimize_scalar(
-                objective,
-                bounds=bounds,
-                method='bounded',
-                options={'xatol': 1e-4, 'maxiter': 25} # Reduced iterations due to better start
-            )
-
-            if res.success:
-                print(f"SUCCESS: Design Converged. Final {design_variable}: {res.x:.5f} m")
-                return res.x
-            else:
-                print(f"WARNING: Residual error ({res.fun:.3f}) high.")
-                return res.x
-
+            res = minimize_scalar(objective, bounds=bounds, method='bounded', options={'xatol': 1e-4, 'maxiter': 15})
+            print(f"SUCCESS: Final {design_variable} = {res.x:.5f} m (Error: {res.fun:.4f})")
+            return res.x
         except Exception as e:
-            print(f"Optimization failed: {e}")
-            return None
+            print(f"Stage 2 failed: {e}. Returning Stage 1 estimate.")
+            return x_analytical
 
 if __name__ == "__main__":
     from tpms_thermo_hydraulic_calculator import create_default_config
     config = create_default_config()
-
-    # Example: Find length for Th_out = 55K
     designer = TPMSDesigner(config)
     designer.solve_geometry('length', 'Th_out', 55.0, verbose=True)

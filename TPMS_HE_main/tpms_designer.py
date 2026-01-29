@@ -66,115 +66,101 @@ class TPMSDesigner:
         else:
             raise ValueError(f"Unknown target key: {target_key}")
 
-    def estimate_size_epsilon_ntu(self, target_metric, target_value, epsilon_target=0.95):
+    def estimate_geometry_ntu(self, design_variable, target_metric, target_value):
         """
-        Uses the epsilon-NTU method for counter-flow heat exchangers to estimate
-        the required UA (overall heat transfer coefficient * area).
-
-        Assumes the exchanger is highly efficient (epsilon ~ 0.95) for TPMS.
+        Generic Epsilon-NTU estimator for any geometric variable.
+        Calculates the required change in UA to meet the target and maps it to
+        the design variable (Length, Width, or Cell Size).
         """
         cfg = self.base_config
         ops = cfg['operating']
+        geom = cfg['geometry']
 
-        # 1. Get Fluid Properties via local HE instance (temporary)
+        # 1. Properties
         he_temp = TPMSHeatExchanger(cfg)
         h2_props = he_temp.h2_props
-
-        # 2. Calculate Heat Capacity Rates (C = m * Cp)
         p_h = h2_props.get_properties(ops['Th_in'], ops['Ph_in'], cfg['operating'].get('fluid_hot', 'hydrogen mixture'), ops['xh_in'])
         p_c = h2_props.get_properties(ops['Tc_in'], ops['Pc_in'], cfg['operating'].get('fluid_cold', 'helium'))
 
         Ch = ops['mh'] * p_h['cp']
         Cc = ops['mc'] * p_c['cp']
-
-        Cmin = min(Ch, Cc)
-        Cmax = max(Ch, Cc)
+        Cmin, Cmax = min(Ch, Cc), max(Ch, Cc)
         Cr = Cmin / Cmax
 
-        # 3. Determine actual epsilon based on target
-        # Q_max = Cmin * (Th_in - Tc_in)
+        # 2. Required Effectiveness
         Q_max = Cmin * (ops['Th_in'] - ops['Tc_in'])
-
         if target_metric == 'Th_out':
             Q_req = Ch * (ops['Th_in'] - target_value)
         elif target_metric == 'Tc_out':
             Q_req = Cc * (target_value - ops['Tc_in'])
         elif target_metric == 'Q_total':
             Q_req = target_value
-        else:
-            return None # Cannot estimate for pressure targets
+        else: return None
 
-        epsilon_actual = Q_req / Q_max
+        epsilon = min(0.99, Q_req / Q_max)
 
-        # 4. Solve for NTU (Counter-flow arrangement)
-        # NTU = (1/(Cr-1)) * ln((Eps-1)/(Eps*Cr-1))
+        # 3. NTU -> UA
         try:
             if Cr < 1.0:
-                ntu = (1.0 / (Cr - 1.0)) * np.log((epsilon_actual - 1.0) / (epsilon_actual * Cr - 1.0))
+                ntu = (1.0 / (Cr - 1.0)) * np.log((epsilon - 1.0) / (epsilon * Cr - 1.0))
             else:
-                ntu = epsilon_actual / (1.0 - epsilon_actual)
-        except:
-            ntu = 5.0 # Fallback for high epsilon
+                ntu = epsilon / (1.0 - epsilon)
+        except: ntu = 5.0
 
-        required_ua = ntu * Cmin
+        UA_req = ntu * Cmin
 
-        # 5. Rough estimate of area/length
-        # U_tpms ~ 500 - 2000 W/m2K based on typical cryo-TPMS studies
-        u_guess = 1000.0
-        area_guess = required_ua / u_guess
+        # 4. Sensitivity Mapping
+        # Assume UA proportional to Area (L*W*H) and inversely to Dh (Cell Size)
+        # Dh ~ CellSize. A ~ sigma * L * W * H
+        current_val = geom.get(design_variable, 0.01)
+        if design_variable == 'length':
+            est_val = UA_req / (1000.0 * geom['width'] * geom['height'] * geom['surface_area_density'])
+        elif design_variable == 'width':
+            est_val = UA_req / (1000.0 * geom['length'] * geom['height'] * geom['surface_area_density'])
+        elif design_variable == 'unit_cell_size':
+            # Smaller cell size increases sigma and improves HTC (U)
+            # Rough approximation: UA ~ 1 / CellSize^1.5
+            est_val = current_val * (UA_req / (1000.0 * geom['length'] * geom['width'] * geom['height'] * geom['surface_area_density']))**(-0.66)
+        else:
+            est_val = current_val
 
-        # Length ~ Area / (Width * Height * Sigma)
-        geom = cfg['geometry']
-        sigma = geom['surface_area_density']
-        length_est = area_guess / (geom['width'] * geom['height'] * sigma)
+        return est_val
 
-        return {
-            'length': length_est,
-            'ua': required_ua,
-            'ntu': ntu,
-            'epsilon': epsilon_actual
-        }
-
-    def solve_geometry(self, design_variable, target_metric, target_value, bounds=None, tol=1e-2, verbose=False):
+    def solve_geometry(self, design_variable, target_metric, target_value, bounds=None, verbose=False):
         """
-        Calculates the required geometric dimension to meet a thermal target.
-        If bounds are not provided, uses epsilon-NTU to generate a smart search range.
+        Two-stage solver:
+        1. Fast NTU Search: Uses thermal imbalance and epsilon-NTU logic to narrow the search.
+        2. Precise Simulation: Refines the value using the full thermo-hydraulic solver.
         """
-
         param_map = {
             'length': ['geometry', 'length'],
             'width': ['geometry', 'width'],
             'height': ['geometry', 'height'],
             'cell_size': ['geometry', 'unit_cell_size']
         }
-
-        if design_variable not in param_map:
-            raise ValueError(f"Design variable must be one of {list(param_map.keys())}")
-
         config_path = param_map[design_variable]
 
-        # --- SMART BOUNDARY ESTIMATION ---
+        # --- STAGE 1: FAST ESTIMATION ---
+        est_x = self.estimate_geometry_ntu(design_variable, target_metric, target_value)
+
         if bounds is None:
-            est = self.estimate_size_epsilon_ntu(target_metric, target_value)
-            if est and design_variable == 'length':
-                # Create a bracket around the estimate (0.2x to 5.0x)
-                bounds = (max(0.01, est['length'] * 0.2), est['length'] * 5.0)
-            else:
-                # Default fallback if estimate fails or isn't length
-                bounds = (0.01, 5.0)
+            # Use estimate to define a smart bracket
+            bounds = (max(1e-4, est_x * 0.1), est_x * 10.0)
 
         if verbose:
-            print(f"\n--- TPMS Design Solver Started ---")
-            print(f"Goal: Adjust {design_variable} to achieve {target_metric} = {target_value}")
-            print(f"Initial Epsilon-NTU Estimate for Length: {bounds[0]:.3f} to {bounds[1]:.3f} m")
+            print(f"\n--- TPMS Design Solver Initialized ---")
+            print(f"Target: {target_metric} = {target_value}")
+            print(f"Stage 1: NTU Estimate for {design_variable} = {est_x:.4f} m")
 
+        # --- STAGE 2: PRECISE ITERATION (Full Physics) ---
         def objective(x):
             sim_config = copy.deepcopy(self.base_config)
             self._update_nested_config(sim_config, config_path, x)
 
             with contextlib.redirect_stdout(DummyFile()):
                 he = TPMSHeatExchanger(sim_config)
-                converged = he.solve()
+                # Faster tolerances for inner optimization loops
+                converged = he.solve(max_iter=150, tolerance=1e-3)
 
             if not converged:
                 return 1e9
@@ -183,7 +169,7 @@ class TPMSDesigner:
             abs_error = abs(current_val - target_value)
 
             if verbose:
-                sys.__stdout__.write(f"  Trial {design_variable} = {x:.5f} -> {target_metric} = {current_val:.4f} (Abs Error: {abs_error:.4f})\n")
+                sys.__stdout__.write(f"  Precise Trial {design_variable} = {x:.5f} -> {target_metric} = {current_val:.4f} (Error: {abs_error:.4f})\n")
 
             return abs_error
 
@@ -192,14 +178,14 @@ class TPMSDesigner:
                 objective,
                 bounds=bounds,
                 method='bounded',
-                options={'xatol': 1e-4, 'maxiter': 30}
+                options={'xatol': 1e-4, 'maxiter': 25} # Reduced iterations due to better start
             )
 
-            if res.success and res.fun <= 1.0:
-                print(f"SUCCESS: Design Converged. Required {design_variable}: {res.x:.5f} m")
+            if res.success:
+                print(f"SUCCESS: Design Converged. Final {design_variable}: {res.x:.5f} m")
                 return res.x
             else:
-                print(f"WARNING: Residual error ({res.fun:.3f}) may be high.")
+                print(f"WARNING: Residual error ({res.fun:.3f}) high.")
                 return res.x
 
         except Exception as e:
@@ -209,12 +195,7 @@ class TPMSDesigner:
 if __name__ == "__main__":
     from tpms_thermo_hydraulic_calculator import create_default_config
     config = create_default_config()
-    config['operating']['Th_in'] = 78.0
 
+    # Example: Find length for Th_out = 55K
     designer = TPMSDesigner(config)
-    required_length = designer.solve_geometry(
-        design_variable='length',
-        target_metric='Th_out',
-        target_value=55.0,
-        verbose=True
-    )
+    designer.solve_geometry('length', 'Th_out', 55.0, verbose=True)

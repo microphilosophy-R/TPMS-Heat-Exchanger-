@@ -7,6 +7,21 @@ Integrated cryogenic TPMS heat-exchanger framework with two-level architecture:
 
 This repository now merges the original two stages into one solver path while keeping backward compatibility with legacy configs.
 
+## Recent Progress (March 2026)
+
+- Completed two-level integration in the main solver:
+  - Level 1 orchestration in `TPMSHeatExchanger`
+  - Level 2 per-channel closure dispatch (`bare`/`packed`)
+- Added canonical channel schema with backward-compatible normalization (`normalize_config`).
+- Upgraded Streamlit UI to a guided 6-step wizard with:
+  - persistent hot/cold channel status strip
+  - autosave/reload/reset
+  - strict blocking validation
+  - final structured confirmation table
+- Fixed runtime stability issues found during UI-driven runs:
+  - Windows console encoding-safe export logs (`[OK] ...` messages)
+  - mathtext parse issue in visualization summary (`Delta P_h` text rendering)
+
 ## Repository Layout
 
 ```text
@@ -15,7 +30,7 @@ TPMS_HE/
 |  |- tpms_thermo_hydraulic_calculator.py   # Integrated solver + config normalization
 |  |- tpms_correlations.py                  # Bare TPMS Nu-Re / f-Re closures
 |  |- packed_bed_model.py                   # Packed-bed TPMS closure model
-|  |- app.py                                # Streamlit UI controller (MVP)
+|  |- app.py                                # Streamlit wizard UI (autosave + validation)
 |  |- hydrogen_properties.py
 |  |- convergence_tracker.py
 |  |- tpms_visualization.py
@@ -127,6 +142,8 @@ Troubleshooting:
 
 - if `streamlit` command is not found, always use:
   - `python -m streamlit run app.py`
+- if autosave causes unexpected form values, use `Reload Autosave` or `Reset Defaults`
+- if you previously saw `ParseException` during plotting, update to the latest code (this is fixed in current version)
 
 ## Mode Combination Examples
 

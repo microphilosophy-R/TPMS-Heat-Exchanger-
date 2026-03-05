@@ -1,4 +1,4 @@
-import pandas as pd
+﻿import pandas as pd
 from matplotlib import pyplot as plt
 
 
@@ -126,9 +126,10 @@ class ConvergenceTracker:
         plt.tight_layout()
         plt.savefig(save_path, dpi=150)
         plt.close()
-        print(f"✓ Convergence plot saved to {save_path}")
+        print(f"[OK] Convergence plot saved to {save_path}")
 
     def export_csv(self, filepath='convergence_data.csv'):
         df = pd.DataFrame(self.history)
         df.to_csv(filepath, index=False)
-        print(f"✓ Convergence data exported to {filepath}")
+        print(f"[OK] Convergence data exported to {filepath}")
+

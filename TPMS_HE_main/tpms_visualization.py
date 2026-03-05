@@ -1,4 +1,4 @@
-"""
+﻿"""
 Visualization Module for TPMS Heat Exchanger (Academic Standard)
 
 Provides comprehensive plotting functions for analyzing heat exchanger performance
@@ -148,7 +148,7 @@ class TPMSVisualizer:
         # Save
         try:
             df.to_csv(filename, index=False)
-            print(f"✓ Results exported successfully to: {filename}")
+            print(f"[OK] Results exported successfully to: {filename}")
         except Exception as e:
             print(f"Error exporting CSV: {e}")
 
@@ -224,7 +224,7 @@ class TPMSVisualizer:
         self._add_summary_text(ax6)
 
         plt.savefig(save_path, bbox_inches='tight', dpi=300)
-        print(f"✓ Performance plot saved to {save_path}")
+        print(f"[OK] Performance plot saved to {save_path}")
         # plt.show() # Optional: Comment out if running in batch mode without display
 
     def _add_summary_text(self, ax):
@@ -246,7 +246,7 @@ class TPMSVisualizer:
         txt = (
                 f"Load: {Q_total:.1f} W\n" +
                 f"Conv Eff: {eff_conv:.1f}%\n" +
-                f"$\Delta P_h$: {dP_hot:.1f} kPa\n" +
+                f"$\\Delta P_h$: {dP_hot:.1f} kPa\n" +
                 f"Effectiveness: {Q_total/self.he.Q_max_capacity*100:.1f}%"
         )
 

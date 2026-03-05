@@ -90,23 +90,31 @@ he.solve(max_iter=cfg["solver"]["max_iter"], tolerance=cfg["solver"]["tolerance"
 he.finalize_simulation()
 ```
 
-## Streamlit UI Controller (MVP)
+## Streamlit UI Controller (Wizard)
 
 Run:
 
 ```bash
 cd TPMS_HE_main
-streamlit run app.py
+python -m streamlit run app.py
 ```
 
-UI sections:
+Wizard steps:
 
-- Geometry
-- Operating conditions
-- Hot channel (`mode`, `structure`, packed params if packed)
-- Cold channel (`mode`, `structure`, packed params if packed)
-- Solver controls
-- Output paths
+- 1) Geometry
+- 2) Operating
+- 3) Channels (hot/cold each with explicit `bare/packed` + TPMS structure)
+- 4) Solver
+- 5) Output
+- 6) Confirm & Run (structured summary table)
+
+UI behavior:
+
+- persistent channel summary strip: `Hot: mode / structure / packed-mode`, `Cold: ...`
+- autosave to `TPMS_HE_main/.streamlit/tpms_ui_state.json`
+- strict validation gate (blocking errors disable `Next`/`Run`)
+- sliders for bounded core fields (porosity, relax factors, `xh_in`, packed `bed_porosity`, `shape_factor`)
+- `Reload Autosave` and `Reset Defaults` controls
 
 Outputs shown in UI:
 
@@ -114,6 +122,11 @@ Outputs shown in UI:
 - generated file paths
 - performance/convergence figures
 - CSV preview
+
+Troubleshooting:
+
+- if `streamlit` command is not found, always use:
+  - `python -m streamlit run app.py`
 
 ## Mode Combination Examples
 

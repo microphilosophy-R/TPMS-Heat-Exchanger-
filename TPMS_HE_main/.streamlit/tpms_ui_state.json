@@ -1,0 +1,64 @@
+{
+  "channels": {
+    "cold": {
+      "mode": "bare",
+      "packed": {
+        "bed_porosity": 0.4,
+        "k_solid": 10.0,
+        "mode": "nominal",
+        "particle_diameter": 0.001,
+        "shape_factor": 1.0
+      },
+      "structure": "Gyroid"
+    },
+    "hot": {
+      "mode": "bare",
+      "packed": {
+        "bed_porosity": 0.4,
+        "k_solid": 10.0,
+        "mode": "nominal",
+        "particle_diameter": 0.001,
+        "shape_factor": 1.0
+      },
+      "structure": "Primitive"
+    }
+  },
+  "geometry": {
+    "height": 0.25,
+    "length": 0.94,
+    "porosity_cold": 0.7,
+    "porosity_hot": 0.65,
+    "surface_area_density": 60.0,
+    "unit_cell_size": 0.005,
+    "wall_thickness": 0.0005,
+    "width": 0.25
+  },
+  "operating": {
+    "Pc_in": 1500000.0,
+    "Ph_in": 2000000.0,
+    "Tc_in": 43.0,
+    "Th_in": 78.0,
+    "fluid_cold": "helium",
+    "fluid_hot": "hydrogen mixture",
+    "mc": 0.06,
+    "mh": 0.02,
+    "xh_in": 0.452
+  },
+  "output": {
+    "convergence_csv": "results/convergence_history.csv",
+    "convergence_plot": "results/convergence_diagnostics.png",
+    "performance_plot": "results/performance_profile.png",
+    "results_csv": "results/final_results.csv"
+  },
+  "solver": {
+    "Q_damping": 0.5,
+    "adaptive_damping": true,
+    "max_iter": 500,
+    "n_elements": 100,
+    "relax": 0.15,
+    "relax_hydraulic": 0.5,
+    "relax_kinetics": 1.0,
+    "relax_thermal": 0.15,
+    "tolerance": 0.001
+  }
+}

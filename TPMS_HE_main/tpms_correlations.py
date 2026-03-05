@@ -17,6 +17,8 @@ class TPMSCorrelations:
     """
     Database of heat transfer and friction correlations for TPMS structures
     """
+
+    SUPPORTED_TPMS_TYPES = ('Gyroid', 'Diamond', 'Primitive', 'Neovius', 'FRD', 'FKS')
     
     # Prandtl numbers for common fluids
     PR_WATER = 6.0
@@ -53,9 +55,9 @@ class TPMSCorrelations:
         Based on experimental data from multiple papers [41], [46], [93],
         [101], [109], [119], [142], [149]
         """
-        # Ensure inputs are arrays
-        Re = np.atleast_1d(Re)
-        Pr = np.atleast_1d(Pr) if not np.isscalar(Pr) else np.full_like(Re, Pr)
+        # Ensure inputs are float arrays
+        Re = np.atleast_1d(np.asarray(Re, dtype=float))
+        Pr = np.atleast_1d(np.asarray(Pr, dtype=float)) if not np.isscalar(Pr) else np.full_like(Re, Pr)
         
         scalar_input = (Re.size == 1)
         
@@ -90,6 +92,11 @@ class TPMSCorrelations:
             f = f[0]
         
         return Nu, f
+
+    @staticmethod
+    def get_supported_tpms_types():
+        """Return supported TPMS structure names."""
+        return TPMSCorrelations.SUPPORTED_TPMS_TYPES
     
     @staticmethod
     def _gyroid_correlations(Re, Pr, fluid_type):

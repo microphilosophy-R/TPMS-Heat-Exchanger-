@@ -1,10 +1,11 @@
-"""
+﻿"""
 TPMS Heat Exchanger Simulation - Unified & Optimized
 Content:
 1. ConvergenceTracker: Tracks solution stability and exports data.
 2. TPMSHeatExchanger: Unified solver with optimized physics and enthalpy relaxation.
 """
 
+import copy
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -17,8 +18,152 @@ from tpms_correlations import TPMSCorrelations
 from tpms_visualization import TPMSVisualizer
 from hydrogen_properties import ThermalProperties
 from convergence_tracker import ConvergenceTracker
+from packed_bed_model import SUPPORTED_PACKED_MODES, create_packed_bed_model
 
 warnings.filterwarnings("ignore")
+
+SUPPORTED_CHANNEL_MODES = ("bare", "packed")
+
+
+def _infer_fluid_type(species):
+    species_key = str(species).lower()
+    if "water" in species_key:
+        return "Water"
+    if "air" in species_key:
+        return "Air"
+    if "rp-3" in species_key or "rp3" in species_key:
+        return "RP-3"
+    return "Gas"
+
+
+def _validate_tpms_structure(structure, stream_key):
+    if structure not in TPMSCorrelations.SUPPORTED_TPMS_TYPES:
+        raise ValueError(
+            f"Unsupported TPMS structure for channel '{stream_key}': {structure}. "
+            f"Supported: {TPMSCorrelations.SUPPORTED_TPMS_TYPES}"
+        )
+
+
+def _normalize_single_channel(cfg, stream_key):
+    channels = cfg.setdefault("channels", {})
+    tpms_cfg = cfg.setdefault("tpms", {})
+    geo = cfg.setdefault("geometry", {})
+    cat = cfg.get("catalyst", {})
+
+    legacy_structure = tpms_cfg.get(f"type_{stream_key}", "Diamond")
+    ch_cfg = copy.deepcopy(channels.get(stream_key, {}))
+
+    mode = str(ch_cfg.get("mode", "bare")).strip().lower()
+    if mode not in SUPPORTED_CHANNEL_MODES:
+        raise ValueError(
+            f"Invalid channel mode '{mode}' for '{stream_key}'. "
+            f"Use one of {SUPPORTED_CHANNEL_MODES}."
+        )
+
+    structure = ch_cfg.get("structure", legacy_structure)
+    _validate_tpms_structure(structure, stream_key)
+
+    packed_defaults = {
+        "particle_diameter": cat.get("particle_diameter", 1e-3),
+        "bed_porosity": cat.get("bed_porosity", 0.40),
+        "k_solid": cat.get("k_solid", 10.0),
+        "shape_factor": cat.get("shape_factor", 1.0),
+        "mode": cat.get("mode", "nominal"),
+    }
+    packed_cfg = copy.deepcopy(packed_defaults)
+    packed_cfg.update(ch_cfg.get("packed", {}))
+
+    packed_mode = str(packed_cfg.get("mode", "nominal")).strip().lower()
+    if packed_mode not in SUPPORTED_PACKED_MODES:
+        raise ValueError(
+            f"Invalid packed mode '{packed_mode}' for '{stream_key}'. "
+            f"Use one of {SUPPORTED_PACKED_MODES}."
+        )
+    packed_cfg["mode"] = packed_mode
+
+    if packed_cfg["particle_diameter"] <= 0:
+        raise ValueError(f"Channel '{stream_key}' packed particle_diameter must be > 0.")
+    if packed_cfg["k_solid"] <= 0:
+        raise ValueError(f"Channel '{stream_key}' packed k_solid must be > 0.")
+    if packed_cfg["shape_factor"] <= 0:
+        raise ValueError(f"Channel '{stream_key}' packed shape_factor must be > 0.")
+    if not (0.05 <= packed_cfg["bed_porosity"] <= 0.95):
+        raise ValueError(
+            f"Channel '{stream_key}' packed bed_porosity must be within [0.05, 0.95]."
+        )
+
+    channels[stream_key] = {
+        "mode": mode,
+        "structure": structure,
+        "packed": packed_cfg,
+    }
+
+    tpms_cfg[f"type_{stream_key}"] = structure
+    if stream_key == "hot":
+        geo.setdefault("porosity_hot", 0.65)
+    else:
+        geo.setdefault("porosity_cold", 0.70)
+
+
+def normalize_config(config):
+    """
+    Normalize legacy and new config schemas into canonical channel-level configuration.
+    """
+    cfg = copy.deepcopy(config)
+
+    cfg.setdefault("geometry", {})
+    cfg.setdefault("material", {})
+    cfg.setdefault("operating", {})
+    cfg.setdefault("solver", {})
+    cfg.setdefault("output", {})
+    cfg.setdefault("tpms", {})
+    cfg.setdefault("channels", {})
+
+    solver = cfg["solver"]
+    if "relax_thermal" not in solver and "relax" in solver:
+        solver["relax_thermal"] = solver["relax"]
+    solver.setdefault("relax_thermal", 0.15)
+    solver.setdefault("relax_hydraulic", 0.5)
+    solver.setdefault("relax_kinetics", 1.0)
+    solver.setdefault("Q_damping", 0.5)
+    solver.setdefault("n_elements", 100)
+    solver.setdefault("max_iter", 500)
+    solver.setdefault("tolerance", 1e-3)
+
+    geo = cfg["geometry"]
+    geo.setdefault("length", 0.94)
+    geo.setdefault("width", 0.25)
+    geo.setdefault("height", 0.25)
+    geo.setdefault("unit_cell_size", 5e-3)
+    geo.setdefault("wall_thickness", 0.5e-3)
+    geo.setdefault("surface_area_density", 60)
+    geo.setdefault("porosity_hot", 0.65)
+    geo.setdefault("porosity_cold", 0.70)
+
+    material = cfg["material"]
+    material.setdefault("k_wall", 237.0)
+
+    operating = cfg["operating"]
+    operating.setdefault("Th_in", 78.0)
+    operating.setdefault("Tc_in", 43.0)
+    operating.setdefault("Ph_in", 2e6)
+    operating.setdefault("Pc_in", 1.5e6)
+    operating.setdefault("mh", 2e-2)
+    operating.setdefault("mc", 6e-2)
+    operating.setdefault("xh_in", 0.452)
+    operating.setdefault("fluid_hot", "hydrogen mixture")
+    operating.setdefault("fluid_cold", "helium")
+
+    output = cfg["output"]
+    output.setdefault("results_csv", "results/final_results.csv")
+    output.setdefault("convergence_csv", "results/convergence_history.csv")
+    output.setdefault("performance_plot", "results/performance_profile.png")
+    output.setdefault("convergence_plot", "results/convergence_diagnostics.png")
+
+    _normalize_single_channel(cfg, "hot")
+    _normalize_single_channel(cfg, "cold")
+
+    return cfg
 
 class TPMSHeatExchanger:
     """
@@ -30,7 +175,7 @@ class TPMSHeatExchanger:
     """
 
     def __init__(self, config):
-        self.config = config
+        self.config = normalize_config(config)
 
         # 1. Initialize Properties Engine
         try:
@@ -39,46 +184,114 @@ class TPMSHeatExchanger:
             raise ImportError("Critical: 'hydrogen_properties.py' not found.")
 
         # 2. Extract Geometry (Global Data)
-        self.N = config['solver']['n_elements']
-        self.L_HE = config['geometry']['length']
-        self.A_heat_total = self.L_HE * config['geometry']['width'] * config['geometry']['height'] * config['geometry'][
-            'surface_area_density']
+        self.N = self.config['solver']['n_elements']
+        self.L_HE = self.config['geometry']['length']
+        self.A_heat_total = (
+            self.L_HE
+            * self.config['geometry']['width']
+            * self.config['geometry']['height']
+            * self.config['geometry']['surface_area_density']
+        )
         self.A_elem = self.A_heat_total / self.N
         self.L_elem = self.L_HE / self.N
-        self.wall_thickness = config['geometry']['wall_thickness']
-        self.k_wall = config['material']['k_wall']
+        self.wall_thickness = self.config['geometry']['wall_thickness']
+        self.k_wall = self.config['material']['k_wall']
 
         # 3. Initialize Stream Constants (Global Data)
         self.streams = {
             'hot': {
-                'species': config['operating'].get('fluid_hot', 'hydrogen mixture'),
-                'm': config['operating']['mh'],
-                'tpms': config['tpms']['type_hot'],
-                'porosity': config['geometry']['porosity_hot'],
-                'Ac': config['geometry']['width'] * config['geometry']['height'] * config['geometry']['porosity_hot'],
-                'Dh': 4 * config['geometry']['porosity_hot'] * config['geometry']['unit_cell_size'] / (2 * np.pi)
+                'species': self.config['operating'].get('fluid_hot', 'hydrogen mixture'),
+                'm': self.config['operating']['mh'],
+                'tpms': self.config['channels']['hot']['structure'],
+                'mode': self.config['channels']['hot']['mode'],
+                'packed_mode': self.config['channels']['hot']['packed']['mode'],
+                'porosity': self.config['geometry']['porosity_hot'],
+                'Ac': self.config['geometry']['width'] * self.config['geometry']['height'] * self.config['geometry']['porosity_hot'],
+                'Dh': 4 * self.config['geometry']['porosity_hot'] * self.config['geometry']['unit_cell_size'] / (2 * np.pi),
+                'fluid_type': _infer_fluid_type(self.config['operating'].get('fluid_hot', 'hydrogen mixture')),
             },
             'cold': {
-                'species': config['operating'].get('fluid_cold', 'helium'),
-                'm': config['operating']['mc'],
-                'tpms': config['tpms']['type_cold'],
-                'porosity': config['geometry']['porosity_cold'],
-                'Ac': config['geometry']['width'] * config['geometry']['height'] * config['geometry']['porosity_cold'],
-                'Dh': 4 * config['geometry']['porosity_cold'] * config['geometry']['unit_cell_size'] / (2 * np.pi)
+                'species': self.config['operating'].get('fluid_cold', 'helium'),
+                'm': self.config['operating']['mc'],
+                'tpms': self.config['channels']['cold']['structure'],
+                'mode': self.config['channels']['cold']['mode'],
+                'packed_mode': self.config['channels']['cold']['packed']['mode'],
+                'porosity': self.config['geometry']['porosity_cold'],
+                'Ac': self.config['geometry']['width'] * self.config['geometry']['height'] * self.config['geometry']['porosity_cold'],
+                'Dh': 4 * self.config['geometry']['porosity_cold'] * self.config['geometry']['unit_cell_size'] / (2 * np.pi),
+                'fluid_type': _infer_fluid_type(self.config['operating'].get('fluid_cold', 'helium')),
             }
         }
 
         # 4. Relaxation Factors (Global Attribution)
-        self.relax_thermal = config['solver'].get('relax_thermal', 0.15)
-        self.relax_hydraulic = config['solver'].get('relax_hydraulic', 0.5)
-        self.relax_kinetics = config['solver'].get('relax_kinetics', 1.0)
-        self.relax_Q = config['solver'].get('Q_damping', 0.5)  # Heat Flux Damping
+        self.relax_thermal = self.config['solver'].get('relax_thermal', self.config['solver'].get('relax', 0.15))
+        self.relax_hydraulic = self.config['solver'].get('relax_hydraulic', 0.5)
+        self.relax_kinetics = self.config['solver'].get('relax_kinetics', 1.0)
+        self.relax_Q = self.config['solver'].get('Q_damping', 0.5)  # Heat Flux Damping
+
+        # 4.5 Initialize channel-level closure registry
+        self._initialize_channel_closures()
 
         # 5. Initialize State Arrays
         self._initialize_state()
 
         # 6. Initialize Tracker
         self.tracker = ConvergenceTracker()
+
+    def _initialize_channel_closures(self):
+        """Build per-channel closure registry (bare or packed)."""
+        self.channel_closure_registry = {}
+        for stream_key in ('hot', 'cold'):
+            ch_cfg = self.config['channels'][stream_key]
+            mode = ch_cfg['mode']
+            packed_model = create_packed_bed_model(self.config, stream_key=stream_key) if mode == 'packed' else None
+            self.channel_closure_registry[stream_key] = {
+                'mode': mode,
+                'structure': ch_cfg['structure'],
+                'packed_mode': ch_cfg['packed']['mode'],
+                'packed_model': packed_model,
+            }
+
+    def get_channel_closure(self, stream_key, Re_channel, Pr, k_f, context):
+        """
+        Unified level-2 closure interface.
+
+        Returns
+        -------
+        Nu : float
+        f : float
+        htc : float
+        details : dict
+        """
+        reg = self.channel_closure_registry[stream_key]
+        structure = reg['structure']
+        dh = context['Dh']
+
+        if reg['mode'] == 'bare':
+            Nu, f = TPMSCorrelations.get_correlations(
+                structure, Re_channel, Pr, context.get('fluid_type', 'Gas')
+            )
+            htc = context.get('htc_factor', 1.0) * Nu * k_f / max(dh, 1e-12)
+            details = {'mode': 'bare', 'structure': structure}
+            return Nu, f, htc, details
+
+        packed_model = reg['packed_model']
+        h_eff, f_equiv, details = packed_model.get_htc_and_friction(
+            Re_channel=Re_channel,
+            Pr=Pr,
+            k_f=k_f,
+            tpms_type=structure,
+            mode=reg['packed_mode'],
+        )
+        Nu_equiv = h_eff * dh / max(k_f, 1e-12)
+        details = {
+            **details,
+            'mode': 'packed',
+            'structure': structure,
+            'packed_mode': reg['packed_mode'],
+            'Nu_equivalent': Nu_equiv,
+        }
+        return Nu_equiv, f_equiv, h_eff, details
 
     def _initialize_state(self):
         """Initializes Nodal, Elemental, and Global data structures with smart initial guess."""
@@ -143,6 +356,7 @@ class TPMSHeatExchanger:
         elem_keys = ['Re', 'Pr', 'Nu', 'f', 'htc']
         self.elem_h = {k: np.zeros(N_elems) for k in elem_keys}
         self.elem_c = {k: np.zeros(N_elems) for k in elem_keys}
+        self.elem_details = {'hot': [None] * N_elems, 'cold': [None] * N_elems}
 
         self.Q = np.zeros(N_elems)
         self.U = np.zeros(N_elems)
@@ -192,7 +406,7 @@ class TPMSHeatExchanger:
         # Unpack Constants
         s = self.streams[stream_key]
         species, m_dot = s['species'], s['m']
-        Ac, Dh, tpms = s['Ac'], s['Dh'], s['tpms']
+        Ac, Dh = s['Ac'], s['Dh']
 
         # Iteration direction: Hot (0 -> N), Cold (N -> 0)
         indices = range(self.N + 1) if is_hot else range(self.N, -1, -1)
@@ -233,18 +447,26 @@ class TPMSHeatExchanger:
                 Re = rho * u * Dh / mu
                 Pr = mu * cp / k_therm
 
-                # Heat Transfer Coefficient
-                # Update: Capture Friction Factor 'f' here
-                Nu, f = TPMSCorrelations.get_correlations(tpms, Re, Pr, 'Gas')
+                # Heat-transfer and friction closure from level-2 registry.
+                Nu, f, htc, details = self.get_channel_closure(
+                    stream_key=stream_key,
+                    Re_channel=Re,
+                    Pr=Pr,
+                    k_f=k_therm,
+                    context={
+                        'Dh': Dh,
+                        'fluid_type': s.get('fluid_type', 'Gas'),
+                        'htc_factor': 1.2 if is_hot else 1.0,
+                    },
+                )
 
                 # Store Data
                 elem_dict['Re'][elem_idx] = Re
                 elem_dict['Pr'][elem_idx] = Pr
                 elem_dict['Nu'][elem_idx] = Nu
                 elem_dict['f'][elem_idx] = f  # Store friction factor
-
-                factor = 1.2 if is_hot else 1.0
-                elem_dict['htc'][elem_idx] = factor * Nu * k_therm / Dh
+                elem_dict['htc'][elem_idx] = htc
+                self.elem_details[stream_key][elem_idx] = details
 
     def _compute_hydraulic_balance(self):
         """
@@ -475,7 +697,11 @@ class TPMSHeatExchanger:
 
     def solve(self, max_iter=500, tolerance=1e-4):
         print("=" * 70)
-        print(f"TPMS Solver Started | Hot: {self.streams['hot']['species']} | Cold: {self.streams['cold']['species']}")
+        print(
+            "TPMS Solver Started | "
+            f"Hot: {self.streams['hot']['species']} ({self.streams['hot']['mode']}) | "
+            f"Cold: {self.streams['cold']['species']} ({self.streams['cold']['mode']})"
+        )
         print(f"Relaxation: Therm={self.relax_thermal}, Hydro={self.relax_hydraulic}, Kin={self.relax_kinetics}")
         print("=" * 70)
 
@@ -552,7 +778,7 @@ class TPMSHeatExchanger:
 
         # Conversion
         print("\nConversion:")
-        print(f"  Para-H₂: {self.xh[0]:.4f} → {self.xh[-1]:.4f}")
+        print(f"  Para-H2: {self.xh[0]:.4f} -> {self.xh[-1]:.4f}")
 
         # Energy balance check
         try:
@@ -630,15 +856,48 @@ def create_default_config():
             'wall_thickness': 0.5e-3, 'surface_area_density': 60
         },
         'tpms': {'type_hot': 'Diamond', 'type_cold': 'Gyroid'},
+        'channels': {
+            'hot': {
+                'mode': 'bare',
+                'structure': 'Diamond',
+                'packed': {
+                    'particle_diameter': 1e-3,
+                    'bed_porosity': 0.40,
+                    'k_solid': 10.0,
+                    'shape_factor': 1.0,
+                    'mode': 'nominal',
+                },
+            },
+            'cold': {
+                'mode': 'bare',
+                'structure': 'Gyroid',
+                'packed': {
+                    'particle_diameter': 1e-3,
+                    'bed_porosity': 0.40,
+                    'k_solid': 10.0,
+                    'shape_factor': 1.0,
+                    'mode': 'nominal',
+                },
+            },
+        },
         'material': {'k_wall': 237},
         'operating': {
             'Th_in': 78, 'Tc_in': 43, 'Ph_in': 2e6, 'Pc_in': 1.5e6,
-            'mh': 2e-2, 'mc': 6e-2, 'xh_in': 0.452
+            'mh': 2e-2, 'mc': 6e-2, 'xh_in': 0.452,
+            'fluid_hot': 'hydrogen mixture',
+            'fluid_cold': 'helium',
         },
-        'catalyst': {'enhancement': 1.2},
+        'catalyst': {
+            'particle_diameter': 1e-3,
+            'bed_porosity': 0.40,
+            'k_solid': 10.0,
+            'shape_factor': 1.0,
+            'mode': 'nominal',
+        },
         'solver': {
             'n_elements': 100, 'max_iter': 500, 'tolerance': 1e-3,
-            'relax': 0.15, 'relax_hydraulic': 0.5, 'relax_kinetics': 1.0,
+            'relax': 0.15, 'relax_thermal': 0.15,
+            'relax_hydraulic': 0.5, 'relax_kinetics': 1.0,
             'Q_damping': 0.5, 'adaptive_damping': True
         },
         'output': {
@@ -661,15 +920,10 @@ plt.rcParams['legend.fontsize'] = 14
 plt.rcParams['figure.dpi'] = 100
 
 if __name__ == "__main__":
-    # Example Config
     config = create_default_config()
-    # Update with specific case values if needed
-    config['operating']['fluid_hot'] = 'hydrogen mixture'
-    config['operating']['fluid_cold'] = 'helium'
-
-    # Solve
     he = TPMSHeatExchanger(config)
-    he.solve()
-
-    # Finalize & Output
+    he.solve(
+        max_iter=config['solver'].get('max_iter', 500),
+        tolerance=config['solver'].get('tolerance', 1e-4),
+    )
     he.finalize_simulation()

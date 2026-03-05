@@ -1,0 +1,35 @@
+# --- Python Byte-compiled / Optimized files ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- Virtual Environments (exclude heavy libraries) ---
+# Common names for virtual envs
+.venv/
+venv/
+env/
+ENV/
+
+# --- IDE & Editor Settings (Personal configs) ---
+# PyCharm
+.idea/
+# VS Code
+.vscode/
+
+# --- Distribution / Build artifacts ---
+dist/
+build/
+*.egg-info/
+
+# --- Jupyter Notebooks ---
+# Exclude checkpoint backups
+.ipynb_checkpoints
+
+# --- OS Generated Files ---
+.DS_Store
+Thumbs.db
+
+# --- Logs & Databases ---
+*.log
+*.sqlite
+*.db

@@ -1,34 +1,54 @@
 {
   "channels": {
     "cold": {
+      "geometry": {
+        "height": null,
+        "length": null,
+        "unit_cell_size": null,
+        "wall_thickness": null,
+        "width": null
+      },
       "mode": "bare",
       "packed": {
         "bed_porosity": 0.4,
+        "htc_model": "martin_nilles",
         "k_solid": 10.0,
         "mode": "nominal",
         "particle_diameter": 0.001,
         "shape_factor": 1.0
       },
-      "structure": "Gyroid"
+      "structure": "Gyroid",
+      "surface_area_density": 655.292
     },
     "hot": {
-      "mode": "bare",
+      "geometry": {
+        "height": null,
+        "length": null,
+        "unit_cell_size": null,
+        "wall_thickness": null,
+        "width": null
+      },
+      "mode": "packed",
       "packed": {
         "bed_porosity": 0.4,
+        "htc_model": "dixon",
         "k_solid": 10.0,
         "mode": "nominal",
         "particle_diameter": 0.001,
         "shape_factor": 1.0
       },
-      "structure": "Primitive"
+      "structure": "Primitive",
+      "surface_area_density": 491.15
     }
   },
   "geometry": {
     "height": 0.25,
+    "identical_channels": true,
     "length": 0.94,
+    "plate_thickness": 0.001,
     "porosity_cold": 0.7,
     "porosity_hot": 0.65,
-    "surface_area_density": 60.0,
+    "surface_area_density": 655.292,
     "unit_cell_size": 0.005,
     "wall_thickness": 0.0005,
     "width": 0.25
@@ -48,6 +68,7 @@
     "convergence_csv": "results/convergence_history.csv",
     "convergence_plot": "results/convergence_diagnostics.png",
     "performance_plot": "results/performance_profile.png",
+    "resistance_pie": "results/resistance_pie.png",
     "results_csv": "results/final_results.csv"
   },
   "solver": {

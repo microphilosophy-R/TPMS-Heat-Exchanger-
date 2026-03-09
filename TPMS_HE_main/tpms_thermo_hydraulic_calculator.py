@@ -20,6 +20,8 @@ from hydrogen_properties import ThermalProperties
 from convergence_tracker import ConvergenceTracker
 from packed_bed_model import SUPPORTED_PACKED_MODES, create_packed_bed_model
 
+SUPPORTED_HTC_MODELS = ('martin_nilles', 'dixon')
+
 warnings.filterwarnings("ignore")
 
 SUPPORTED_CHANNEL_MODES = ("bare", "packed")
@@ -81,6 +83,14 @@ def _normalize_single_channel(cfg, stream_key):
         )
     packed_cfg["mode"] = packed_mode
 
+    htc_model = str(packed_cfg.get("htc_model", "martin_nilles")).strip().lower()
+    if htc_model not in SUPPORTED_HTC_MODELS:
+        raise ValueError(
+            f"Invalid htc_model '{htc_model}' for '{stream_key}'. "
+            f"Use one of {SUPPORTED_HTC_MODELS}."
+        )
+    packed_cfg["htc_model"] = htc_model
+
     if packed_cfg["particle_diameter"] <= 0:
         raise ValueError(f"Channel '{stream_key}' packed particle_diameter must be > 0.")
     if packed_cfg["k_solid"] <= 0:
@@ -92,11 +102,25 @@ def _normalize_single_channel(cfg, stream_key):
             f"Channel '{stream_key}' packed bed_porosity must be within [0.05, 0.95]."
         )
 
-    channels[stream_key] = {
+    # Preserve per-channel surface_area_density if the user supplied it
+    ch_sad = ch_cfg.get("surface_area_density", None)
+    # Preserve per-channel geometry overrides (None means "use global")
+    ch_geo_raw = ch_cfg.get("geometry", {}) or {}
+    canonical = {
         "mode": mode,
         "structure": structure,
         "packed": packed_cfg,
+        "geometry": {
+            "length":         ch_geo_raw.get("length",         None),
+            "width":          ch_geo_raw.get("width",          None),
+            "height":         ch_geo_raw.get("height",         None),
+            "unit_cell_size": ch_geo_raw.get("unit_cell_size", None),
+            "wall_thickness": ch_geo_raw.get("wall_thickness", None),
+        },
     }
+    if ch_sad is not None:
+        canonical["surface_area_density"] = ch_sad
+    channels[stream_key] = canonical
 
     tpms_cfg[f"type_{stream_key}"] = structure
     if stream_key == "hot":
@@ -136,6 +160,7 @@ def normalize_config(config):
     geo.setdefault("height", 0.25)
     geo.setdefault("unit_cell_size", 5e-3)
     geo.setdefault("wall_thickness", 0.5e-3)
+    geo.setdefault("plate_thickness", 1.0e-3)
     geo.setdefault("surface_area_density", 60)
     geo.setdefault("porosity_hot", 0.65)
     geo.setdefault("porosity_cold", 0.70)
@@ -159,9 +184,15 @@ def normalize_config(config):
     output.setdefault("convergence_csv", "results/convergence_history.csv")
     output.setdefault("performance_plot", "results/performance_profile.png")
     output.setdefault("convergence_plot", "results/convergence_diagnostics.png")
+    output.setdefault("performance_eval_plot", "results/performance_evaluation.png")
 
     _normalize_single_channel(cfg, "hot")
     _normalize_single_channel(cfg, "cold")
+
+    # Per-channel SAD fallback: if not set by user, inherit global SAD
+    global_sad = geo.get("surface_area_density", 60)
+    for sk in ("hot", "cold"):
+        cfg["channels"][sk].setdefault("surface_area_density", global_sad)
 
     return cfg
 
@@ -183,21 +214,45 @@ class TPMSHeatExchanger:
         except ImportError:
             raise ImportError("Critical: 'hydrogen_properties.py' not found.")
 
-        # 2. Extract Geometry (Global Data)
+        # 2. Extract Geometry — per-channel (falls back to global)
         self.N = self.config['solver']['n_elements']
-        self.L_HE = self.config['geometry']['length']
-        self.A_heat_total = (
-            self.L_HE
-            * self.config['geometry']['width']
-            * self.config['geometry']['height']
-            * self.config['geometry']['surface_area_density']
-        )
-        self.A_elem = self.A_heat_total / self.N
-        self.L_elem = self.L_HE / self.N
-        self.wall_thickness = self.config['geometry']['wall_thickness']
-        self.k_wall = self.config['material']['k_wall']
 
-        # 3. Initialize Stream Constants (Global Data)
+        def _ch_geo(sk):
+            """Return (L, W, H, Lc, tw) for channel sk, falling back to global geometry."""
+            ch_geo = self.config['channels'][sk].get('geometry', {}) or {}
+            L  = ch_geo.get('length')         or self.config['geometry']['length']
+            W  = ch_geo.get('width')          or self.config['geometry']['width']
+            H  = ch_geo.get('height')         or self.config['geometry']['height']
+            Lc = ch_geo.get('unit_cell_size') or self.config['geometry']['unit_cell_size']
+            tw = ch_geo.get('wall_thickness') or self.config['geometry']['wall_thickness']
+            return float(L), float(W), float(H), float(Lc), float(tw)
+
+        L_h, W_h, H_h, Lc_h, tw_h = _ch_geo('hot')
+        L_c, W_c, H_c, Lc_c, tw_c = _ch_geo('cold')
+
+        # Per-channel surface area densities [1/m]
+        alpha_h = self.config['channels']['hot']['surface_area_density']
+        alpha_c = self.config['channels']['cold']['surface_area_density']
+
+        # Per-channel elemental heat transfer areas [m²]
+        self.A_elem_h = L_h * W_h * H_h * alpha_h / self.N
+        self.A_elem_c = L_c * W_c * H_c * alpha_c / self.N
+        # Legacy attributes (hot-side reference)
+        self.L_HE         = L_h
+        self.L_HE_c       = L_c
+        self.A_heat_total  = L_h * W_h * H_h * alpha_h
+        self.A_elem        = self.A_elem_h
+        self.L_elem        = L_h / self.N    # hot-channel element length
+        self.L_elem_c      = L_c / self.N    # cold-channel element length
+        self.wall_thickness   = tw_h     # hot-side TPMS skeleton thickness (legacy name)
+        self.wall_thickness_c = tw_c     # cold-side TPMS skeleton thickness
+        self.plate_thickness  = float(self.config['geometry'].get(
+            'plate_thickness', self.config['geometry']['wall_thickness']))  # dividing plate
+        self.k_wall         = self.config['material']['k_wall']
+
+        # 3. Initialize Stream Constants (per-channel geometry applied)
+        por_h = self.config['geometry']['porosity_hot']
+        por_c = self.config['geometry']['porosity_cold']
         self.streams = {
             'hot': {
                 'species': self.config['operating'].get('fluid_hot', 'hydrogen mixture'),
@@ -205,9 +260,10 @@ class TPMSHeatExchanger:
                 'tpms': self.config['channels']['hot']['structure'],
                 'mode': self.config['channels']['hot']['mode'],
                 'packed_mode': self.config['channels']['hot']['packed']['mode'],
-                'porosity': self.config['geometry']['porosity_hot'],
-                'Ac': self.config['geometry']['width'] * self.config['geometry']['height'] * self.config['geometry']['porosity_hot'],
-                'Dh': 4 * self.config['geometry']['porosity_hot'] * self.config['geometry']['unit_cell_size'] / (2 * np.pi),
+                'htc_model': self.config['channels']['hot']['packed']['htc_model'],
+                'porosity': por_h,
+                'Ac': W_h * H_h * por_h,
+                'Dh': 4 * por_h * Lc_h / (2 * np.pi),
                 'fluid_type': _infer_fluid_type(self.config['operating'].get('fluid_hot', 'hydrogen mixture')),
             },
             'cold': {
@@ -216,12 +272,30 @@ class TPMSHeatExchanger:
                 'tpms': self.config['channels']['cold']['structure'],
                 'mode': self.config['channels']['cold']['mode'],
                 'packed_mode': self.config['channels']['cold']['packed']['mode'],
-                'porosity': self.config['geometry']['porosity_cold'],
-                'Ac': self.config['geometry']['width'] * self.config['geometry']['height'] * self.config['geometry']['porosity_cold'],
-                'Dh': 4 * self.config['geometry']['porosity_cold'] * self.config['geometry']['unit_cell_size'] / (2 * np.pi),
+                'htc_model': self.config['channels']['cold']['packed']['htc_model'],
+                'porosity': por_c,
+                'Ac': W_c * H_c * por_c,
+                'Dh': 4 * por_c * Lc_c / (2 * np.pi),
                 'fluid_type': _infer_fluid_type(self.config['operating'].get('fluid_cold', 'helium')),
             }
         }
+
+        # 3b. SmoothPlateFin override: replace TPMS Dh with rectangular-duct Dh
+        _ch_WH = {'hot': (W_h, H_h), 'cold': (W_c, H_c)}
+        for sk in ('hot', 'cold'):
+            if self.streams[sk]['tpms'] == 'SmoothPlateFin':
+                eps = self.streams[sk]['porosity']
+                Wsk, Hsk = _ch_WH[sk]
+                Ac_rect = Wsk * Hsk * eps
+                Dh_rect = 4 * Ac_rect / (2 * (Wsk + Hsk * eps))
+                self.streams[sk]['Ac'] = Ac_rect
+                self.streams[sk]['Dh'] = Dh_rect
+
+        # Store per-channel SAD and elemental area in stream dicts for reference
+        self.streams['hot']['surface_area_density'] = alpha_h
+        self.streams['cold']['surface_area_density'] = alpha_c
+        self.streams['hot']['A_elem'] = self.A_elem_h
+        self.streams['cold']['A_elem'] = self.A_elem_c
 
         # 4. Relaxation Factors (Global Attribution)
         self.relax_thermal = self.config['solver'].get('relax_thermal', self.config['solver'].get('relax', 0.15))
@@ -244,11 +318,22 @@ class TPMSHeatExchanger:
         for stream_key in ('hot', 'cold'):
             ch_cfg = self.config['channels'][stream_key]
             mode = ch_cfg['mode']
-            packed_model = create_packed_bed_model(self.config, stream_key=stream_key) if mode == 'packed' else None
+            if mode == 'packed':
+                ch_geo_ov = ch_cfg.get('geometry', {}) or {}
+                cell_size_ov = ch_geo_ov.get('unit_cell_size') or None
+                t_wall_ov = ch_geo_ov.get('wall_thickness') or None
+                packed_model = create_packed_bed_model(
+                    self.config, stream_key=stream_key,
+                    cell_size_override=cell_size_ov,
+                    t_wall_override=t_wall_ov,
+                )
+            else:
+                packed_model = None
             self.channel_closure_registry[stream_key] = {
                 'mode': mode,
                 'structure': ch_cfg['structure'],
                 'packed_mode': ch_cfg['packed']['mode'],
+                'htc_model': ch_cfg['packed']['htc_model'],
                 'packed_model': packed_model,
             }
 
@@ -271,7 +356,7 @@ class TPMSHeatExchanger:
             Nu, f = TPMSCorrelations.get_correlations(
                 structure, Re_channel, Pr, context.get('fluid_type', 'Gas')
             )
-            htc = context.get('htc_factor', 1.0) * Nu * k_f / max(dh, 1e-12)
+            htc = Nu * k_f / max(dh, 1e-12)
             details = {'mode': 'bare', 'structure': structure}
             return Nu, f, htc, details
 
@@ -282,6 +367,7 @@ class TPMSHeatExchanger:
             k_f=k_f,
             tpms_type=structure,
             mode=reg['packed_mode'],
+            htc_model=reg['htc_model'],
         )
         Nu_equiv = h_eff * dh / max(k_f, 1e-12)
         details = {
@@ -289,6 +375,7 @@ class TPMSHeatExchanger:
             'mode': 'packed',
             'structure': structure,
             'packed_mode': reg['packed_mode'],
+            'htc_model': reg['htc_model'],
             'Nu_equivalent': Nu_equiv,
         }
         return Nu_equiv, f_equiv, h_eff, details
@@ -343,11 +430,15 @@ class TPMSHeatExchanger:
         self.Ph = np.linspace(ops['Ph_in'], ops['Ph_in'] * 0.99, N_nodes)
         self.Pc = np.linspace(ops['Pc_in'] * 0.99, ops['Pc_in'], N_nodes)
 
-        self.xh = np.linspace(ops['xh_in'], 0.9, N_nodes) if 'hydrogen' in self.streams['hot']['species'] else np.zeros(N_nodes)
+        if 'hydrogen' in self.streams['hot']['species']:
+            # Keep initial para-fraction flat; avoids fake conversion profile when kinetics are disabled.
+            self.xh = np.full(N_nodes, ops['xh_in'])
+        else:
+            self.xh = np.zeros(N_nodes)
 
         # Derived Properties (Dict of Arrays)
-        # keys: rho, mu, cp, k (conductivity), h (enthalpy)
-        prop_keys = ['rho', 'mu', 'cp', 'k', 'h']
+        # keys: rho, mu, cp, k (conductivity), h (enthalpy), s (entropy)
+        prop_keys = ['rho', 'mu', 'cp', 'k', 'h', 's']
         self.props_h = {k: np.zeros(N_nodes) for k in prop_keys}
         self.props_c = {k: np.zeros(N_nodes) for k in prop_keys}
 
@@ -360,6 +451,19 @@ class TPMSHeatExchanger:
 
         self.Q = np.zeros(N_elems)
         self.U = np.zeros(N_elems)
+
+        # Thermal resistance arrays per element [K/W] — filled by _compute_energy_balance()
+        self.R_hot  = np.zeros(N_elems)   # total hot-side resistance
+        self.R_cold = np.zeros(N_elems)   # total cold-side resistance
+        self.R_wall = np.zeros(N_elems)   # wall conduction resistance
+        # Sub-resistances for packed channels (equals R_hot/R_cold when bare)
+        self.R_hot_wall_film  = np.zeros(N_elems)
+        self.R_hot_bed_cond   = np.zeros(N_elems)
+        self.R_cold_wall_film = np.zeros(N_elems)
+        self.R_cold_bed_cond  = np.zeros(N_elems)
+
+        # Performance evaluation metrics (populated by _compute_performance_metrics)
+        self.perf = {}
 
         # --- 4. CONVERGENCE MEMORY ---
         self.Th_old = np.zeros_like(self.Th)
@@ -424,6 +528,7 @@ class TPMSHeatExchanger:
             props_dict['cp'][i]  = p_val['cp']
             props_dict['k'][i]   = p_val['lambda']
             props_dict['h'][i]   = p_val['h']
+            props_dict['s'][i]   = p_val.get('s', 0.0)   # specific entropy [J/kg·K]
 
             # --- B. Update Elemental Physics (HTC only) ---
             # Hot: Element i corresponds to Node i (Upwind)
@@ -456,7 +561,6 @@ class TPMSHeatExchanger:
                     context={
                         'Dh': Dh,
                         'fluid_type': s.get('fluid_type', 'Gas'),
-                        'htc_factor': 1.2 if is_hot else 1.0,
                     },
                 )
 
@@ -513,7 +617,8 @@ class TPMSHeatExchanger:
                 u = m_dot / (rho * Ac)
 
                 # Explicit Pressure Drop
-                dP = f * (self.L_elem / Dh) * (rho * u**2 / 2)
+                L_elem_sk = self.L_elem if is_hot else self.L_elem_c
+                dP = f * (L_elem_sk / Dh) * (rho * u**2 / 2)
 
                 # Update P_calc strictly
                 P_calc[next_node_idx] = P_calc[node_idx] + (sign * dP)
@@ -530,21 +635,55 @@ class TPMSHeatExchanger:
         mh = self.streams['hot']['m']
         mc = self.streams['cold']['m']
 
-        # 1. Calculate Heat Load & U (Elemental)
+        # 1. Calculate Heat Load & UA (Elemental)
         for i in range(self.N):
-            # Thermal Resistance
-            h_hot = max(self.elem_h['htc'][i], 1e-5)
+            # Per-element thermal conductances [W/K]
+            h_hot  = max(self.elem_h['htc'][i], 1e-5)
             h_cold = max(self.elem_c['htc'][i], 1e-5)
 
-            R_total = (1 / h_hot) + (self.wall_thickness / self.k_wall) + (1 / h_cold)
-            self.U[i] = 1 / R_total
+            G_hot  = h_hot  * self.A_elem_h                         # hot-side conductance [W/K]
+            G_cold = h_cold * self.A_elem_c                         # cold-side conductance [W/K]
+            G_wall = self.k_wall * self.A_elem_h / max(self.plate_thickness, 1e-9)  # dividing plate conduction [W/K]
+
+            # Total conductance UA [W/K] — reference-area-independent
+            UA_elem = 1.0 / (1.0/G_hot + 1.0/G_wall + 1.0/G_cold)
+            # Store U referenced to hot-side area for output compatibility
+            self.U[i] = UA_elem / self.A_elem_h
+
+            # --- Thermal resistance breakdown [K/W] ---
+            R_hot_total  = 1.0 / G_hot
+            R_cold_total = 1.0 / G_cold
+            R_wall_total = 1.0 / G_wall
+            self.R_hot[i]  = R_hot_total
+            self.R_cold[i] = R_cold_total
+            self.R_wall[i] = R_wall_total
+
+            # Sub-split for packed hot channel
+            d_h = self.elem_details['hot'][i]
+            if d_h and d_h.get('mode') == 'packed' and 'R_wall_film' in d_h:
+                r_pack = max(d_h['R_total'], 1e-30)
+                self.R_hot_wall_film[i] = (d_h['R_wall_film']      / r_pack) * R_hot_total
+                self.R_hot_bed_cond[i]  = (d_h['R_bed_conduction'] / r_pack) * R_hot_total
+            else:
+                self.R_hot_wall_film[i] = R_hot_total   # bare: single bucket
+                self.R_hot_bed_cond[i]  = 0.0
+
+            # Sub-split for packed cold channel
+            d_c = self.elem_details['cold'][i]
+            if d_c and d_c.get('mode') == 'packed' and 'R_wall_film' in d_c:
+                r_pack = max(d_c['R_total'], 1e-30)
+                self.R_cold_wall_film[i] = (d_c['R_wall_film']      / r_pack) * R_cold_total
+                self.R_cold_bed_cond[i]  = (d_c['R_bed_conduction'] / r_pack) * R_cold_total
+            else:
+                self.R_cold_wall_film[i] = R_cold_total  # bare: single bucket
+                self.R_cold_bed_cond[i]  = 0.0
 
             # Average Temps for Element
             Th_avg = 0.5 * (self.Th[i] + self.Th[i + 1])
             Tc_avg = 0.5 * (self.Tc[i] + self.Tc[i + 1])
 
-            # Raw Heat Flux
-            Q_raw = self.U[i] * self.A_elem * (Th_avg - Tc_avg)
+            # Raw Heat Transfer [W] — UA·ΔT, no explicit area needed
+            Q_raw = UA_elem * (Th_avg - Tc_avg)
 
             # --- THERMODYNAMIC LIMIT CHECK (Local Enthalpy Potential) ---
             # Q cannot exceed the capacity of the hot stream to cool to Tc_avg
@@ -629,6 +768,11 @@ class TPMSHeatExchanger:
         if 'hydrogen' not in self.streams['hot']['species']:
             return
 
+        if self.streams['hot'].get('mode', 'bare') != 'packed':
+            # Packed catalyst absent: force zero reaction-rate behavior.
+            self.xh[:] = self.xh[0]
+            return
+
         xh_calc = self.xh.copy() # Temporary array for calculated profile
         Ac = self.streams['hot']['Ac']
         mh = self.streams['hot']['m']
@@ -703,11 +847,56 @@ class TPMSHeatExchanger:
             f"Cold: {self.streams['cold']['species']} ({self.streams['cold']['mode']})"
         )
         print(f"Relaxation: Therm={self.relax_thermal}, Hydro={self.relax_hydraulic}, Kin={self.relax_kinetics}")
+        if 'hydrogen' in self.streams['hot']['species'] and self.streams['hot']['mode'] == 'packed':
+            print("Conversion model: ON (hot channel packed)")
+        elif 'hydrogen' in self.streams['hot']['species']:
+            print("Conversion model: OFF (hot channel bare)")
+        else:
+            print("Conversion model: OFF (hot fluid non-hydrogen)")
         print("=" * 70)
 
         # Initial Physics Pass to populate properties
         self._update_stream_physics('hot')
         self._update_stream_physics('cold')
+
+        # Auto-tune Q_damping (relax_Q) based on estimated NTU.
+        # High surface-to-volume ratio (high SAD) produces large UA_elem, making the
+        # solver stiff. A large relax_Q (0.5) causes Q to overshoot the thermodynamic
+        # limit each iteration → oscillatory non-convergence. Reducing relax_Q for
+        # high-NTU cases stabilises the Q update and allows dQ to decay.
+        try:
+            h_hot_mean  = max(np.mean(self.elem_h['htc']), 1e-9)
+            h_cold_mean = max(np.mean(self.elem_c['htc']), 1e-9)
+            G_hot_elem  = h_hot_mean  * self.A_elem_h
+            G_cold_elem = h_cold_mean * self.A_elem_c
+            G_wall_elem = self.k_wall * self.A_elem_h / max(self.plate_thickness, 1e-9)
+            UA_elem_est = 1.0 / (1.0 / max(G_hot_elem, 1e-30) +
+                                 1.0 / max(G_wall_elem, 1e-30) +
+                                 1.0 / max(G_cold_elem, 1e-30))
+            UA_total_est = UA_elem_est * self.N
+            C_min_est = min(
+                self.streams['hot']['m']  * max(np.mean(self.props_h['cp']), 1.0),
+                self.streams['cold']['m'] * max(np.mean(self.props_c['cp']), 1.0)
+            )
+            NTU_est = UA_total_est / max(C_min_est, 1e-6)
+            # Scale relax_Q DOWN for stiff (high-NTU) systems
+            if NTU_est > 20:
+                auto_relax_Q = 0.05
+            elif NTU_est > 5:
+                auto_relax_Q = 0.10
+            elif NTU_est > 1:
+                auto_relax_Q = 0.25
+            else:
+                auto_relax_Q = self.relax_Q  # no change for NTU < 1
+            self.relax_Q = min(self.relax_Q, auto_relax_Q)
+            print(f"NTU estimate = {NTU_est:.2f} → Q_damping auto-set to {self.relax_Q:.3f}")
+        except Exception:
+            pass  # Keep user-configured relax_Q on any error
+
+        # Error-tracking adaptive relaxation state
+        # Initialized here so error_val is always defined before the update step.
+        adaptive_relax = self.relax_thermal
+        _prev_error = float('inf')
 
         for iteration in range(max_iter):
             # Snapshot Old State
@@ -725,19 +914,28 @@ class TPMSHeatExchanger:
             # 3. Hydraulics (Pressure Drop)
             self._compute_hydraulic_balance()
 
-            # 4. Energy Balance (Q & T)
-            # Use dynamic relax for thermal if needed, or stick to configured self.relax_thermal
-            # Combining adaptive strategy with base configured value
-            adaptive_relax = min(0.5, self.relax_thermal + 0.01 * iteration) if iteration > 10 else self.relax_thermal
+            # 4. Energy Balance (Q & T) — uses adaptive_relax from previous iteration's error check
             self._compute_energy_balance(adaptive_relax)
 
             # 5. Error Check
             error_val, error_dict = self._calculate_unified_error()
 
+            # Update adaptive_relax for NEXT iteration using error-tracking strategy.
+            # High-SAD (stiff) systems need smaller relaxation when error grows, not larger.
+            # The old monotonic ramp (relax_thermal + 0.01*iter) increased into the unstable
+            # regime for stiff problems. This version backs off when the error increases.
+            if error_val > _prev_error * 1.05:
+                # Error grew → reduce relaxation to damp oscillations
+                adaptive_relax = max(0.05, adaptive_relax * 0.85)
+            else:
+                # Error shrinking or flat → cautiously increase up to 0.5
+                adaptive_relax = min(0.5, adaptive_relax * 1.03)
+            _prev_error = error_val
+
             # 6. Tracking
             self.tracker.update(iteration, error_dict, self, adaptive_relax)
             if (iteration + 1) % 10 == 0 or iteration < 5:
-                print(f"Iter {iteration + 1:3d} | Err: {error_val:.2e} (dT:{error_dict['dT']:.1e}, dQ:{error_dict['dQ']:.1e}, dP:{error_dict['dP']:.1e}) | Q_tot: {np.sum(self.Q):.2f}W")
+                print(f"Iter {iteration + 1:3d} | Err: {error_val:.2e} (dT:{error_dict['dT']:.1e}, dQ:{error_dict['dQ']:.1e}, dP:{error_dict['dP']:.1e}) | Q_tot: {np.sum(self.Q):.2f}W | relax:{adaptive_relax:.3f}")
                 if np.isnan(error_val) or error_val > 1e4:
                     print("!!! Divergence Detected !!!"); break
 
@@ -750,8 +948,109 @@ class TPMSHeatExchanger:
         self._print_results()
         return False
 
+    def _compute_performance_metrics(self):
+        """Compute post-processing performance indicators:
+        - Exergy efficiency η_ex and entropy generation S_gen (using T0 = Tc_in)
+        - Colburn j-factor and PEC = j / f^(1/3) per element and channel mean
+        Results stored in self.perf dict.
+        """
+        ops = self.config['operating']
+        T0 = float(ops['Tc_in'])   # dead-state = cold inlet
+        mh = self.streams['hot']['m']
+        mc = self.streams['cold']['m']
+        N = self.N
+
+        # --- 1. j-factor and PEC (per element) ---
+        j_h   = np.zeros(N)
+        j_c   = np.zeros(N)
+        PEC_h = np.zeros(N)
+        PEC_c = np.zeros(N)
+        for i in range(N):
+            Re_h = max(self.elem_h['Re'][i], 1e-6)
+            Re_c = max(self.elem_c['Re'][i], 1e-6)
+            Pr_h = max(self.elem_h['Pr'][i], 1e-6)
+            Pr_c = max(self.elem_c['Pr'][i], 1e-6)
+            f_h  = max(self.elem_h['f'][i],  1e-12)
+            f_c  = max(self.elem_c['f'][i],  1e-12)
+            j_h[i]   = self.elem_h['Nu'][i] * Pr_h**(-1.0/3.0) / Re_h
+            j_c[i]   = self.elem_c['Nu'][i] * Pr_c**(-1.0/3.0) / Re_c
+            PEC_h[i] = j_h[i] / f_h**(1.0/3.0)
+            PEC_c[i] = j_c[i] / f_c**(1.0/3.0)
+
+        # --- 2. Exergy per node (specific flow exergy relative to dead state) ---
+        # ex_i = (h_i - h0) - T0*(s_i - s0)
+        # Dead-state reference: hot at (T0, Ph_in), cold at (T0, Pc_in)
+        try:
+            ref_h = self.h2_props.get_properties(
+                T0, ops['Ph_in'], self.streams['hot']['species'], ops.get('xh_in', 0.5))
+            h0_h = ref_h['h']
+            s0_h = ref_h.get('s', 0.0)
+        except Exception:
+            h0_h, s0_h = 0.0, 0.0
+
+        try:
+            ref_c = self.h2_props.get_properties(
+                T0, ops['Pc_in'], self.streams['cold']['species'])
+            h0_c = ref_c['h']
+            s0_c = ref_c.get('s', 0.0)
+        except Exception:
+            h0_c, s0_c = 0.0, 0.0
+
+        ex_h = np.zeros(N + 1)
+        ex_c = np.zeros(N + 1)
+        for i in range(N + 1):
+            ex_h[i] = (self.props_h['h'][i] - h0_h) - T0 * (self.props_h['s'][i] - s0_h)
+            ex_c[i] = (self.props_c['h'][i] - h0_c) - T0 * (self.props_c['s'][i] - s0_c)
+
+        # --- 3. Elemental exergy destruction and entropy generation ---
+        # Hot flows 0 → N (node 0 = inlet, node N = outlet)
+        # Cold flows N → 0 (node N = inlet, node 0 = outlet)
+        Ex_hot_lost  = np.zeros(N)   # exergy given up by hot [W]
+        Ex_cold_gain = np.zeros(N)   # exergy received by cold [W]
+        Ex_dest      = np.zeros(N)   # elemental destruction [W]
+        for i in range(N):
+            Ex_hot_lost[i]  = mh * (ex_h[i]     - ex_h[i + 1])    # hot loses exergy downstream
+            Ex_cold_gain[i] = mc * (ex_c[i + 1] - ex_c[i])        # cold gains exergy upstream
+            Ex_dest[i] = Ex_hot_lost[i] - Ex_cold_gain[i]
+
+        Ex_hot_total  = float(np.sum(np.maximum(Ex_hot_lost,  0.0)))
+        Ex_cold_total = float(np.sum(np.maximum(Ex_cold_gain, 0.0)))
+        Ex_dest_total = float(np.sum(np.maximum(Ex_dest,      0.0)))
+
+        eta_ex = Ex_cold_total / max(Ex_hot_total, 1e-12)
+        S_gen = Ex_dest / max(T0, 1e-6)      # per element [W/K]
+        S_gen_total = float(np.sum(np.maximum(S_gen, 0.0)))
+
+        self.perf = {
+            'T0':           T0,
+            'ex_h':         ex_h,
+            'ex_c':         ex_c,
+            'Ex_hot_lost':  Ex_hot_lost,
+            'Ex_cold_gain': Ex_cold_gain,
+            'Ex_dest':      Ex_dest,
+            'Ex_hot_total': Ex_hot_total,
+            'Ex_cold_total': Ex_cold_total,
+            'eta_ex':        eta_ex,
+            'S_gen':         S_gen,
+            'S_gen_total':   S_gen_total,
+            'j_h':           j_h,
+            'j_c':           j_c,
+            'PEC_h':         PEC_h,
+            'PEC_c':         PEC_c,
+            'j_mean_h':      float(np.mean(j_h)),
+            'j_mean_c':      float(np.mean(j_c)),
+            'PEC_mean_h':    float(np.mean(PEC_h)),
+            'PEC_mean_c':    float(np.mean(PEC_c)),
+        }
+
     def _print_results(self):
         """Print comprehensive results"""
+        # Compute performance metrics before printing
+        try:
+            self._compute_performance_metrics()
+        except Exception as _e:
+            print(f"Warning: Performance metrics computation failed: {_e}")
+
         print("=" * 70)
         print("RESULTS - Thermo-Hydraulic Performance")
         print("=" * 70)
@@ -779,6 +1078,12 @@ class TPMSHeatExchanger:
         # Conversion
         print("\nConversion:")
         print(f"  Para-H2: {self.xh[0]:.4f} -> {self.xh[-1]:.4f}")
+        if 'hydrogen' in self.streams['hot']['species'] and self.streams['hot']['mode'] == 'packed':
+            print("  Conversion model: ON (hot channel packed)")
+        elif 'hydrogen' in self.streams['hot']['species']:
+            print("  Conversion model: OFF (hot channel bare)")
+        else:
+            print("  Conversion model: OFF (hot fluid non-hydrogen)")
 
         # Energy balance check
         try:
@@ -795,6 +1100,15 @@ class TPMSHeatExchanger:
             print(f"  Imbalance: {imbalance:.2f}%")
         except Exception as e:
             print(f"\nEnergy Balance: Could not calculate - {e}")
+
+        # Performance Evaluation Indicators
+        if self.perf:
+            p = self.perf
+            print("\nPerformance Evaluation:")
+            print(f"  Exergy efficiency η_ex:   {p['eta_ex']*100:.1f}%")
+            print(f"  Entropy generation S_gen:  {p['S_gen_total']*1e3:.3f} mW/K  (T0 = {p['T0']:.2f} K)")
+            print(f"  j-factor mean (hot/cold):  {p['j_mean_h']:.4f} / {p['j_mean_c']:.4f}")
+            print(f"  PEC mean (hot/cold):       {p['PEC_mean_h']:.4f} / {p['PEC_mean_c']:.4f}")
         print("=" * 70)
 
     def finalize_simulation(self):
@@ -814,9 +1128,10 @@ class TPMSHeatExchanger:
         path_conv_csv = out_cfg.get('convergence_csv', 'output/tpms_convergence.csv')
         path_perf_plot = out_cfg.get('performance_plot', 'output/tpms_performance.png')
         path_conv_plot = out_cfg.get('convergence_plot', 'output/tpms_convergence.png')
+        path_res_pie = out_cfg.get('resistance_pie', 'output/tpms_resistance_pie.png')
 
         # Create directories if they don't exist
-        for path in [path_results_csv, path_conv_csv, path_perf_plot, path_conv_plot]:
+        for path in [path_results_csv, path_conv_csv, path_perf_plot, path_conv_plot, path_res_pie]:
             directory = os.path.dirname(path)
             if directory and not os.path.exists(directory):
                 try:
@@ -837,6 +1152,17 @@ class TPMSHeatExchanger:
         print(f"Exporting detailed results: {path_results_csv}...")
         vis.export_results_to_csv(filename=path_results_csv)
 
+        print(f"Generating resistance pie chart: {path_res_pie}...")
+        vis.plot_resistance_pie(save_path=path_res_pie)
+        # Write path back into output config so run_simulation() can return it
+        self.config['output']['resistance_pie'] = path_res_pie
+
+        # Performance evaluation plot (exergy + j-factor + PEC)
+        path_perf_eval = out_cfg.get('performance_eval_plot', 'results/performance_evaluation.png')
+        print(f"Generating performance evaluation plot: {path_perf_eval}...")
+        vis.plot_performance_evaluation(save_path=path_perf_eval)
+        self.config['output']['performance_eval_plot'] = path_perf_eval
+
         # 2. Convergence Tracking
         print(f"Generating convergence plot: {path_conv_plot}...")
         self.tracker.plot(save_path=path_conv_plot)
@@ -853,30 +1179,38 @@ def create_default_config():
         'geometry': {
             'length': 0.94, 'width': 0.25, 'height': 0.25,
             'porosity_hot': 0.65, 'porosity_cold': 0.70, 'unit_cell_size': 5e-3,
-            'wall_thickness': 0.5e-3, 'surface_area_density': 60
+            'wall_thickness': 0.5e-3, 'plate_thickness': 1.0e-3, 'surface_area_density': 60
         },
         'tpms': {'type_hot': 'Diamond', 'type_cold': 'Gyroid'},
         'channels': {
             'hot': {
                 'mode': 'bare',
                 'structure': 'Diamond',
+                'surface_area_density': 60,
+                'geometry': {'length': None, 'width': None, 'height': None,
+                             'unit_cell_size': None, 'wall_thickness': None},
                 'packed': {
                     'particle_diameter': 1e-3,
                     'bed_porosity': 0.40,
                     'k_solid': 10.0,
                     'shape_factor': 1.0,
                     'mode': 'nominal',
+                    'htc_model': 'martin_nilles',
                 },
             },
             'cold': {
                 'mode': 'bare',
                 'structure': 'Gyroid',
+                'surface_area_density': 60,
+                'geometry': {'length': None, 'width': None, 'height': None,
+                             'unit_cell_size': None, 'wall_thickness': None},
                 'packed': {
                     'particle_diameter': 1e-3,
                     'bed_porosity': 0.40,
                     'k_solid': 10.0,
                     'shape_factor': 1.0,
                     'mode': 'nominal',
+                    'htc_model': 'martin_nilles',
                 },
             },
         },
@@ -893,6 +1227,7 @@ def create_default_config():
             'k_solid': 10.0,
             'shape_factor': 1.0,
             'mode': 'nominal',
+            'htc_model': 'martin_nilles',
         },
         'solver': {
             'n_elements': 100, 'max_iter': 500, 'tolerance': 1e-3,
@@ -904,7 +1239,9 @@ def create_default_config():
             'results_csv': 'results/final_results.csv',
             'convergence_csv': 'results/convergence_history.csv',
             'performance_plot': 'results/performance_profile.png',
-            'convergence_plot': 'results/convergence_diagnostics.png'
+            'convergence_plot': 'results/convergence_diagnostics.png',
+            'resistance_pie': 'results/resistance_pie.png',
+            'performance_eval_plot': 'results/performance_evaluation.png',
         }
     }
 

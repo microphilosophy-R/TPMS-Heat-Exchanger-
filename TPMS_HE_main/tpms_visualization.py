@@ -6,6 +6,7 @@ with publication-quality formatting (Times New Roman, specific font sizes).
 Updated for compatibility with the new dictionary-based TPMSHeatExchanger class.
 """
 
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
@@ -142,6 +143,20 @@ class TPMSVisualizer:
         for key, arr in elemental_vars.items():
             data[key] = pad(arr)
 
+        # --- 3. Performance Evaluation Metrics (from self.perf, if computed) ---
+        perf = getattr(he, 'perf', {})
+        if perf:
+            data['j_Hot']      = pad(perf['j_h'])
+            data['j_Cold']     = pad(perf['j_c'])
+            data['PEC_Hot']    = pad(perf['PEC_h'])
+            data['PEC_Cold']   = pad(perf['PEC_c'])
+            data['Ex_dest_W']  = pad(perf['Ex_dest'])
+            data['S_gen_W_K']  = pad(perf['S_gen'])
+        else:
+            nan_col = np.full(N + 1, np.nan)
+            for col in ('j_Hot', 'j_Cold', 'PEC_Hot', 'PEC_Cold', 'Ex_dest_W', 'S_gen_W_K'):
+                data[col] = nan_col.copy()
+
         # Create DataFrame
         df = pd.DataFrame(data)
 
@@ -253,6 +268,202 @@ class TPMSVisualizer:
         ax.text(0.05, 0.5, txt, transform=ax.transAxes,
                 verticalalignment='center', linespacing=1.8,
                 fontsize=14, bbox=dict(facecolor='white', alpha=0.9, edgecolor='gray', boxstyle='round,pad=0.5'))
+
+    def plot_resistance_pie(self, save_path=None):
+        """Pie chart of element-averaged thermal resistance breakdown.
+
+        For packed-bed channels, the hot/cold resistance is split into
+        near-wall film and bed-conduction components.  For bare channels
+        it appears as a single convection slice.
+
+        Parameters
+        ----------
+        save_path : str or None
+            File path to save the figure.  If None the figure is not saved.
+
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+        """
+        he = self.he
+
+        # --- Build label/value lists dynamically ---
+        labels = []
+        values = []
+        colors = []
+
+        hot_mode  = he.config['channels']['hot'].get('mode', 'bare')
+        cold_mode = he.config['channels']['cold'].get('mode', 'bare')
+        hot_struct  = he.config['channels']['hot'].get('structure', '')
+        cold_struct = he.config['channels']['cold'].get('structure', '')
+
+        # Hot-side slices
+        if hot_mode == 'packed' and np.any(he.R_hot_bed_cond > 0):
+            labels += [f'Hot near-wall film\n({hot_struct})',
+                       f'Hot bed conduction\n({hot_struct})']
+            values += [float(np.mean(he.R_hot_wall_film)),
+                       float(np.mean(he.R_hot_bed_cond))]
+            colors += ['#d62728', '#ff7f0e']
+        else:
+            labels += [f'Hot convection\n({hot_struct})']
+            values += [float(np.mean(he.R_hot))]
+            colors += ['#d62728']
+
+        # Wall slice
+        labels += ['Wall conduction']
+        values += [float(np.mean(he.R_wall))]
+        colors += ['#7f7f7f']
+
+        # Cold-side slices
+        if cold_mode == 'packed' and np.any(he.R_cold_bed_cond > 0):
+            labels += [f'Cold near-wall film\n({cold_struct})',
+                       f'Cold bed conduction\n({cold_struct})']
+            values += [float(np.mean(he.R_cold_wall_film)),
+                       float(np.mean(he.R_cold_bed_cond))]
+            colors += ['#1f77b4', '#17becf']
+        else:
+            labels += [f'Cold convection\n({cold_struct})']
+            values += [float(np.mean(he.R_cold))]
+            colors += ['#1f77b4']
+
+        values = np.array(values, dtype=float)
+        total  = values.sum()
+
+        # Explode the dominant slice slightly
+        explode = np.zeros(len(values))
+        if total > 0:
+            explode[np.argmax(values)] = 0.05
+
+        fig, ax = plt.subplots(figsize=(7, 6))
+        wedges, texts, autotexts = ax.pie(
+            values,
+            labels=labels,
+            colors=colors,
+            autopct='%1.1f%%',
+            explode=explode,
+            startangle=90,
+            pctdistance=0.78,
+            wedgeprops=dict(linewidth=0.8, edgecolor='white'),
+        )
+        for t in autotexts:
+            t.set_fontsize(10)
+
+        ax.set_title('Thermal Resistance Breakdown\n(element-averaged)', fontsize=13)
+
+        # Reference info box
+        mean_UA = float(np.mean(1.0 / (he.R_hot + he.R_wall + he.R_cold)))
+        info = (f"Mean UA = {mean_UA:.3g} W/K\n"
+                f"Total R = {total:.3g} K/W")
+        ax.text(1.25, -0.05, info, transform=ax.transAxes,
+                fontsize=9, va='center',
+                bbox=dict(facecolor='white', edgecolor='gray',
+                          boxstyle='round,pad=0.4', alpha=0.9))
+
+        fig.tight_layout()
+        if save_path:
+            fig.savefig(save_path, bbox_inches='tight', dpi=200)
+            print(f"[OK] Resistance pie chart saved to {save_path}")
+        plt.close(fig)
+        return fig
+
+    def plot_performance_evaluation(self, save_path='results/performance_evaluation.png'):
+        """4-panel performance evaluation figure:
+        (a) Exergy destruction profile
+        (b) Colburn j-factor profiles (hot & cold)
+        (c) PEC = j/f^(1/3) profiles (hot & cold)
+        (d) Summary table of key indicators
+        """
+        perf = getattr(self.he, 'perf', {})
+        if not perf:
+            print("[WARN] Performance metrics not computed — skipping performance evaluation plot.")
+            return None
+
+        fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+        fig.suptitle("Performance Evaluation — Exergy & PEC Analysis", fontsize=13, fontweight='bold')
+        x_elem = np.linspace(0, 1, self.he.N)
+
+        col_hot  = self.colors.get('hot',  '#d62728')
+        col_cold = self.colors.get('cold', '#1f77b4')
+        col_dest = self.colors.get('wall', '#7f7f7f')
+
+        hot_struct  = self.he.streams['hot']['tpms']
+        cold_struct = self.he.streams['cold']['tpms']
+
+        # --- (a) Exergy destruction profile ---
+        ax = axes[0, 0]
+        ax.plot(x_elem, perf['Ex_hot_lost']  * 1e3, color=col_hot,  lw=1.5,
+                label=f"Hot supplied ({hot_struct})")
+        ax.plot(x_elem, perf['Ex_cold_gain'] * 1e3, color=col_cold, lw=1.5,
+                label=f"Cold gained ({cold_struct})")
+        ax.fill_between(x_elem, np.maximum(perf['Ex_dest'], 0) * 1e3,
+                         color=col_dest, alpha=0.35, label="Destruction")
+        ax.set_xlabel(r'Normalised position $\xi$')
+        ax.set_ylabel('Exergy flux [mW]')
+        ax.set_title('(a) Elemental Exergy Balance')
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+
+        # --- (b) Colburn j-factor ---
+        ax = axes[0, 1]
+        ax.plot(x_elem, perf['j_h'], color=col_hot,  lw=1.5,
+                label=f"Hot j  (mean={perf['j_mean_h']:.4f})")
+        ax.plot(x_elem, perf['j_c'], color=col_cold, lw=1.5,
+                label=f"Cold j  (mean={perf['j_mean_c']:.4f})")
+        ax.axhline(perf['j_mean_h'], color=col_hot,  ls='--', lw=0.8, alpha=0.6)
+        ax.axhline(perf['j_mean_c'], color=col_cold, ls='--', lw=0.8, alpha=0.6)
+        ax.set_xlabel(r'Normalised position $\xi$')
+        ax.set_ylabel(r'Colburn $j$-factor  $j = Nu\,Pr^{-1/3}/Re$')
+        ax.set_title('(b) Heat Transfer: Colburn j-factor')
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+
+        # --- (c) PEC = j / f^(1/3) ---
+        ax = axes[1, 0]
+        ax.plot(x_elem, perf['PEC_h'], color=col_hot,  lw=1.5,
+                label=f"Hot PEC  (mean={perf['PEC_mean_h']:.4f})")
+        ax.plot(x_elem, perf['PEC_c'], color=col_cold, lw=1.5,
+                label=f"Cold PEC  (mean={perf['PEC_mean_c']:.4f})")
+        ax.axhline(perf['PEC_mean_h'], color=col_hot,  ls='--', lw=0.8, alpha=0.6)
+        ax.axhline(perf['PEC_mean_c'], color=col_cold, ls='--', lw=0.8, alpha=0.6)
+        ax.set_xlabel(r'Normalised position $\xi$')
+        ax.set_ylabel(r'PEC $= j\,/\,f^{1/3}$')
+        ax.set_title(r'(c) Performance Evaluation Criterion  PEC $= j/f^{1/3}$')
+        ax.legend(fontsize=7)
+        ax.grid(True, alpha=0.3)
+
+        # --- (d) Summary table ---
+        ax = axes[1, 1]
+        ax.axis('off')
+        Q_total = float(np.sum(self.he.Q))
+        effectiveness = Q_total / max(self.he.Q_max_capacity, 1e-12) * 100
+        summary_lines = [
+            r"$\bf{Exergy\ Analysis}$",
+            f"  Dead-state T₀ = {perf['T0']:.2f} K  (Tc_in)",
+            f"  Ex supplied (hot)  = {perf['Ex_hot_total']*1e3:.2f} mW",
+            f"  Ex recovered (cold) = {perf['Ex_cold_total']*1e3:.2f} mW",
+            f"  Ex destroyed       = {float(np.sum(np.maximum(perf['Ex_dest'],0)))*1e3:.2f} mW",
+            f"  η_ex               = {perf['eta_ex']*100:.1f}%",
+            f"  S_gen_total        = {perf['S_gen_total']*1e3:.3f} mW/K",
+            "",
+            r"$\bf{Thermo-Hydraulic\ Performance}$",
+            f"  Effectiveness       = {effectiveness:.1f}%",
+            f"  j_mean  hot / cold  = {perf['j_mean_h']:.4f} / {perf['j_mean_c']:.4f}",
+            f"  PEC_mean hot / cold = {perf['PEC_mean_h']:.4f} / {perf['PEC_mean_c']:.4f}",
+            f"  Structure  hot      = {hot_struct}",
+            f"  Structure  cold     = {cold_struct}",
+        ]
+        ax.text(0.03, 0.97, "\n".join(summary_lines),
+                transform=ax.transAxes, va='top', ha='left',
+                fontsize=8.5, linespacing=1.6,
+                bbox=dict(boxstyle='round,pad=0.4', facecolor='#f5f5f5', alpha=0.8))
+        ax.set_title('(d) Summary')
+
+        plt.tight_layout()
+        os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
+        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        print(f"[OK] Performance evaluation plot saved to {save_path}")
+        plt.close(fig)
+        return fig
 
 
 if __name__ == "__main__":

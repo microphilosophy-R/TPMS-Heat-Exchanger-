@@ -18,7 +18,8 @@ class TPMSCorrelations:
     Database of heat transfer and friction correlations for TPMS structures
     """
 
-    SUPPORTED_TPMS_TYPES = ('Gyroid', 'Diamond', 'Primitive', 'Neovius', 'FRD', 'FKS')
+    SUPPORTED_TPMS_TYPES = ('Gyroid', 'Diamond', 'Primitive', 'Neovius', 'FRD', 'FKS',
+                             'SmoothPlateFin')
     
     # Prandtl numbers for common fluids
     PR_WATER = 6.0
@@ -73,8 +74,9 @@ class TPMSCorrelations:
             'Neovius': TPMSCorrelations._neovius_correlations,
             'FRD': TPMSCorrelations._frd_correlations,
             'FKS': TPMSCorrelations._fks_correlations,
+            'SmoothPlateFin': TPMSCorrelations._smooth_plate_fin_correlations,
         }
-        
+
         if tpms_type not in correlation_map:
             warnings.warn(f"Unknown TPMS type: {tpms_type}. Using Gyroid correlations.")
             tpms_type = 'Gyroid'
@@ -263,6 +265,36 @@ class TPMSCorrelations:
         
         return Nu, f
     
+    @staticmethod
+    def _smooth_plate_fin_correlations(Re, Pr, fluid_type):
+        """
+        Plain smooth parallel-plate channel baseline.
+
+        Nusselt number: Dittus-Boelter (turbulent) / constant Nu=3.66 (laminar).
+        Friction factor: Petukhov-Filonenko Fanning (turbulent) / f=16/Re (laminar).
+
+        Used as PEC reference: setting a channel to SmoothPlateFin gives the
+        classical plate-fin result under identical flow area and mass flow rate.
+
+        Nu = 0.023 Re^0.8 Pr^0.4          (Re > 2300)
+        Nu = 3.66                           (Re <= 2300, fully-developed laminar)
+        f  = (0.790 ln Re - 1.64)^-2 / 4  (Re > 2300, Fanning from Petukhov-Filonenko)
+        f  = 16 / Re                        (Re <= 2300)
+        """
+        Re_safe = np.maximum(Re, 1.0)
+        turb = Re > 2300
+
+        Nu = np.where(
+            turb,
+            np.maximum(3.66, 0.023 * Re_safe**0.8 * Pr**0.4),
+            3.66 * np.ones_like(Re)
+        )
+
+        f_turb = (0.790 * np.log(Re_safe) - 1.64) ** (-2) / 4.0
+        f = np.where(turb, f_turb, 16.0 / Re_safe)
+
+        return Nu, f
+
     @staticmethod
     def _fks_correlations(Re, Pr, fluid_type):
         """FKS TPMS correlations"""

@@ -21,6 +21,24 @@ This repository now merges the original two stages into one solver path while ke
 - Fixed runtime stability issues found during UI-driven runs:
   - Windows console encoding-safe export logs (`[OK] ...` messages)
   - mathtext parse issue in visualization summary (`Delta P_h` text rendering)
+- Added TPMS Geometry Estimator panel (Step 1 – Geometry):
+  - Surface area density (SAD) estimation via Marching Cubes (scikit-image, optional)
+    for Gyroid, Diamond, Primitive; empirical formulas for Neovius, FRD, FKS
+  - Fluid cross-section area vs. axial position plot (voxel-counting, Matplotlib)
+  - "Use this value" button writes estimated SAD back to `surface_area_density` input
+  - Iso-value search via `scipy.optimize.brentq` in normalized [0, 2π] space
+  - Graceful fallback to analytic-constant approximations when scikit-image absent
+- Added equation expanders to Step 3 – Channels:
+  - Bare mode: shows Nu/f correlations for each TPMS structure and fluid type
+  - Packed mode: shows HTC model equations (ZBS/Martin-Nilles, Dixon) and Ergun
+    pressure drop with per-structure ψ correction factors
+- Added `SmoothPlateFin` as a built-in TPMS structure (see below)
+- Removed `k_enhance` dispersion multiplier from packed-bed model
+  (`overall_htc_packed_side`): the empirical 1.2×/1.5× conductivity boost for
+  nominal/upper modes is removed. TPMS geometry effects on effective conductivity
+  are now captured by `C_shape` (geometric path shortcut: 8→6→4) and the accurate
+  `surface_area_density` from the Geometry Estimator. The two remaining enhancement
+  mechanisms are `C_shape` and `area_factor` (fin efficiency).
 
 ## Repository Layout
 
@@ -38,6 +56,108 @@ TPMS_HE/
 |- results/
 |- results_packed_vs_bare/
 ```
+
+## Heat Transfer Area Model
+
+Hot and cold channels may use **different TPMS structures** (e.g. Gyroid hot,
+Diamond cold), each with a different specific surface area density α. The solver
+therefore maintains **per-channel elemental areas**:
+
+```
+A_elem_h = L_HE * W * H * α_h / N_elements   [hot channel]
+A_elem_c = L_HE * W * H * α_c / N_elements   [cold channel]
+```
+
+The heat transfer per element is computed in **conductance space** (W/K),
+which is reference-area-independent and correct for any α_h / α_c combination:
+
+```
+G_hot    = h_h * A_elem_h          [W/K]  hot-side convective conductance
+G_cold   = h_c * A_elem_c          [W/K]  cold-side convective conductance
+G_wall   = k_wall * A_elem_h / t   [W/K]  wall conduction conductance
+
+UA_elem  = 1 / (1/G_hot + 1/G_wall + 1/G_cold)   [W/K]  total conductance
+Q_elem   = UA_elem * ΔT                            [W]
+```
+
+This is the standard Kays & London formulation:
+`1/(UA) = 1/(h_h·A_h) + R_wall + 1/(h_c·A_c)`.
+`UA` (W/K) is the only area-reference-independent quantity; `Q = UA·ΔT` requires
+no explicit reference area choice.
+
+**Hydraulic quantities** (velocity, Re, dP) remain per-channel and use their own
+cross-sectional area and Dh independently of α:
+
+```
+Ac_h = W * H * ε_h    Dh_h = 4·ε_h·cell_size/(2π)
+Ac_c = W * H * ε_c    Dh_c = 4·ε_c·cell_size/(2π)
+```
+
+### Per-channel α configuration
+
+Each channel has its own `surface_area_density` key in the config:
+
+```python
+config["channels"]["hot"]["surface_area_density"] = 1500   # e.g. Gyroid [1/m]
+config["channels"]["cold"]["surface_area_density"] = 1653  # e.g. Diamond [1/m]
+```
+
+If not set, both channels fall back to `config["geometry"]["surface_area_density"]`
+(backward-compatible default = 60 m⁻¹). In the UI, each channel card in Step 3
+has its own α input; the Geometry Estimator "Use this value" button writes to the
+active channel's α.
+
+`U[i]` stored in output CSV is referenced to the hot-side area (W/m²K × A_h = W/K).
+
+### Packed-bed TPMS enhancement mechanisms
+
+In packed mode (`overall_htc_packed_side`), TPMS geometry enhances heat transfer
+through two mechanisms:
+
+1. **C_shape** — geometric path shortcut: TPMS channels reduce the effective
+   conduction length relative to a circular tube.
+   - `lower`: C_shape = 8 (round-tube baseline)
+   - `nominal`: C_shape = 6 (moderate TPMS shortcut)
+   - `upper`: C_shape = 4 (aggressive shortcut)
+
+2. **area_factor** — fin area enhancement: TPMS ligaments protrude into the packed
+   bed, acting as fins with efficiency η computed from `tpms_fin_efficiency()`.
+
+```
+h_eff = area_factor / R_total
+area_factor = 1 + f_fin * eta_fin    (lower: f=0, nominal: f=0.2, upper: f=0.4)
+```
+
+The `f_fin` fractions (0.2/0.4) are conservative placeholders. Future work will
+derive these from the actual TPMS `surface_area_density` ratio `(α_TPMS/α_flat - 1)`
+using the Geometry Estimator output.
+
+`k_enhance` (a dispersion multiplier applied to `k_r_eff`) has been removed. The
+geometric effect it approximated is now captured by `C_shape` and the accurate SAD.
+
+`A_elem` itself is unchanged — `area_factor` multiplies only the effective HTC.
+
+### SmoothPlateFin baseline structure
+
+A plain parallel-plate channel (`SmoothPlateFin`) is supported as a first-class
+"TPMS" structure alongside Gyroid, Diamond, etc. It uses:
+
+- **Nu**: Dittus-Boelter — `Nu = 0.023 Re^0.8 Pr^n` (n=0.4 heating, n=0.3 cooling);
+  laminar fallback `Nu = 3.66` for Re < 2300
+- **f**: Petukhov-Filonenko Fanning — `f = (0.790 ln Re − 1.64)^−2 / 4`;
+  laminar fallback `f = 16/Re`
+- **surface_area_density**: `2/H` (two flat walls, channel height H); no TPMS
+  multiplier
+- **hydraulic diameter**: `2·W·H·ε / (W + H·ε)` (rectangular duct)
+
+Setting one or both channels to `SmoothPlateFin` gives the classical plate-fin
+result under identical geometry and flow conditions, enabling direct PEC comparison:
+
+```
+PEC = (Q_TPMS / Q_plateFin) / (ΔP_TPMS / ΔP_plateFin)^(1/3)
+```
+
+This ratio is reported in the output CSV and shown in the Step 6 Run Result panel.
 
 ## Two-Level Integration Design
 
@@ -57,6 +177,19 @@ Implemented via `get_channel_closure(...)` dispatch:
 - `mode="bare"` -> `TPMSCorrelations.get_correlations(...)`
 - `mode="packed"` -> `PackedBedTPMSModel.get_htc_and_friction(...)`
 - returns unified `(Nu, f, htc, details)` contract
+
+## Ortho-Para Conversion Gating
+
+Ortho-to-para hydrogen conversion is now tied to **hot channel mode**:
+
+- hot channel `packed` + hydrogen hot fluid -> conversion kinetics **ON**
+- hot channel `bare` + hydrogen hot fluid -> conversion kinetics **OFF** (`rate = 0`)
+- non-hydrogen hot fluid -> conversion kinetics **OFF**
+
+Implementation details:
+
+- `xh` is initialized as a flat inlet profile (no artificial conversion ramp).
+- In bare hot-channel cases, solver enforces constant `xh` profile each iteration.
 
 ## New Canonical Config Schema
 
@@ -153,18 +286,22 @@ All 4 hot/cold combinations are supported:
 # 1) bare / bare
 cfg["channels"]["hot"]["mode"] = "bare"
 cfg["channels"]["cold"]["mode"] = "bare"
+# hydrogen conversion: OFF (rate=0)
 
 # 2) packed / bare
 cfg["channels"]["hot"]["mode"] = "packed"
 cfg["channels"]["cold"]["mode"] = "bare"
+# hydrogen conversion: ON
 
 # 3) bare / packed
 cfg["channels"]["hot"]["mode"] = "bare"
 cfg["channels"]["cold"]["mode"] = "packed"
+# hydrogen conversion: OFF (hot channel controls kinetics)
 
 # 4) packed / packed
 cfg["channels"]["hot"]["mode"] = "packed"
 cfg["channels"]["cold"]["mode"] = "packed"
+# hydrogen conversion: ON
 ```
 
 ## Stage 2 Chinese Notation Note

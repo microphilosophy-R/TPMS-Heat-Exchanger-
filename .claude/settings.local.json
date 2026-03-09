@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(ls -la \"c:\\\\大论文\\\\code\\\\TPMS_HE\\\\TPMS_HE_main\"\" 2>/dev/null || ls -la \"/c/大论文/code/TPMS_HE/TPMS_HE_main/\" 2>/dev/null || find /c -type d -name \"TPMS_HE_main \")"
+    ]
+  }
+}

@@ -1118,13 +1118,17 @@ class TPMSHeatExchanger:
             1.0 - Ex_dest_thermal / max(Ex_He_consumed, 1e-12),
             0.0, 1.0))
 
-        # Chemical exergy net contribution (residual from the balance)
+        # Chemical exergy net contribution: how much of H2's exergy gain came from
+        # ortho-para conversion (internal source) rather than the He refrigerant.
+        # Ex_chem_net > 0 when conversion adds exergy beyond what He supplied (thermally).
         Ex_chem_net = Ex_H2_total_gain - (Ex_He_consumed - Ex_dest_thermal)
 
-        # Global balance residual — should be ≈ 0 if the property model is
-        # thermodynamically consistent (validates the Gouy-Stodola sum).
-        Ex_balance_residual = (Ex_He_consumed + Ex_chem_net
-                               - Ex_H2_total_gain - Ex_dest_grand)
+        # Global balance residual (Gouy-Stodola): Ex_supplied - Ex_gained - Ex_destroyed = 0
+        # Correct form: He exergy in - H2 exergy gain - all destruction sources.
+        # (Ex_chem_net must NOT appear here; it is already embedded in Ex_H2_total_gain
+        #  and Ex_dest_chem_tot via the property model's h and s values.)
+        # This residual ≈ 0 iff enthalpy/entropy accounting is thermodynamically consistent.
+        Ex_balance_residual = Ex_He_consumed - Ex_H2_total_gain - Ex_dest_grand
 
         # --- Legacy aliases (backward compatibility) ---
         Ex_cold_net  = mc * float(ex_c[-1] - ex_c[0])   # = Ex_He_consumed

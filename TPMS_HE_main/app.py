@@ -25,6 +25,7 @@ STEP_DEFS = [
         "title": "5. Confirm & Run",
         "sections": ["geometry", "operating", "channels", "solver", "output"],
     },
+    {"key": "results", "title": "6. Results", "sections": []},
 ]
 
 
@@ -121,6 +122,7 @@ def init_ui_state():
     st.session_state.current_step = 0
     st.session_state.ui_version = 0
     st.session_state.run_result = None
+    st.session_state.last_run_at = None
     st.session_state.init_messages = msgs
     st.session_state.last_saved_blob = json.dumps(
         ui_state, ensure_ascii=False, sort_keys=True
@@ -628,6 +630,10 @@ def _mc_surface_area_density(tpms_type: str, unit_cell_size: float,
     coords = np.linspace(0, L, grid_n, endpoint=False)
     XX, YY, ZZ = np.meshgrid(coords, coords, coords, indexing='ij')
     f_grid = _eval_tpms(tpms_type, XX, YY, ZZ, a)
+    # Wrap periodic boundary: append first plane in each axis so MC sees the full unit cell
+    f_grid = np.concatenate([f_grid, f_grid[0:1, :, :]], axis=0)
+    f_grid = np.concatenate([f_grid, f_grid[:, 0:1, :]], axis=1)
+    f_grid = np.concatenate([f_grid, f_grid[:, :, 0:1]], axis=2)
     t_iso = _find_iso_value(tpms_type, porosity, grid_n=40)
 
     try:
@@ -674,11 +680,12 @@ def _compute_tpms_cross_section(tpms_type: str, unit_cell_size: float,
     a = L / (2.0 * np.pi)
     t_iso = _find_iso_value(tpms_type, porosity, grid_n=40)
 
-    n_yz = 50
-    y_vals = np.linspace(0, L, n_yz, endpoint=False)
-    z_vals = np.linspace(0, L, n_yz, endpoint=False)
+    n_yz = 80
+    h_yz = L / n_yz
+    y_vals = np.arange(n_yz) * h_yz + 0.5 * h_yz   # cell-centred midpoints, no boundary nodes
+    z_vals = np.arange(n_yz) * h_yz + 0.5 * h_yz
     YY, ZZ = np.meshgrid(y_vals, z_vals, indexing='ij')
-    x_positions = np.linspace(0, L, n_slices, endpoint=False)
+    x_positions = np.linspace(0, L, n_slices, endpoint=True)
 
     areas = np.empty(n_slices)
     for i, x0 in enumerate(x_positions):
@@ -853,8 +860,8 @@ def _render_channel_estimator(state, sk):
     L_cell = float(ch_geo.get("unit_cell_size") or geo["unit_cell_size"])
     eps    = float(geo[f"porosity_{sk}"])
     struct = state["channels"][sk]["structure"]
-    GRID_N   = 60
-    N_SLICES = 30
+    GRID_N   = 80
+    N_SLICES = 50
 
     with st.expander(f"TPMS Geometry Estimator — {sk.capitalize()} channel", expanded=False):
         st.caption(
@@ -935,6 +942,17 @@ def render_step_operating(state):
         value=float(state["operating"]["xh_in"]),
         step=0.001,
         key=_k("op_xh"),
+    )
+    state["operating"]["T_ambient"] = st.number_input(
+        "Ambient (dead-state) temperature T₀ [K]",
+        min_value=200.0,
+        max_value=400.0,
+        value=float(state["operating"].get("T_ambient", 298.0)),
+        format="%.1f",
+        key=_k("op_T0"),
+        help="Reference temperature for exergy analysis. Use ambient (~298 K) for "
+             "liquefaction applications. Both streams are sub-ambient, so cold exergy "
+             "is measured relative to this value.",
     )
 
 
@@ -1432,7 +1450,12 @@ def run_simulation(state):
 def render_run_result():
     result = st.session_state.get("run_result")
     if not result:
+        st.info("No results yet. Complete the setup on pages 1–5 and press **Run Simulation**.")
         return
+
+    last_run = st.session_state.get("last_run_at")
+    if last_run:
+        st.caption(f"Last run: {last_run}")
 
     st.divider()
     st.subheader("Latest Run Result")
@@ -1483,6 +1506,31 @@ def render_run_result():
             st.warning(f"Could not load CSV preview: {exc}")
 
 
+def render_nav_bar(current: int, position: str = "top"):
+    """Render a row of step-pill buttons. Active step is highlighted; Results pill
+    is disabled until a simulation result exists.
+
+    Args:
+        current: Index of the active step.
+        position: 'top' or 'bottom' — used to generate unique widget keys.
+    """
+    cols = st.columns(len(STEP_DEFS))
+    for i, (col, sdef) in enumerate(zip(cols, STEP_DEFS)):
+        is_active = (i == current)
+        is_disabled = is_active or (
+            sdef["key"] == "results" and not st.session_state.get("run_result")
+        )
+        if col.button(
+            sdef["title"],
+            key=f"navpill_{position}_{i}",
+            type="primary" if is_active else "secondary",
+            disabled=is_disabled,
+            use_container_width=True,
+        ):
+            st.session_state.current_step = i
+            st.rerun()
+
+
 def main():
     st.set_page_config(page_title="TPMS HE Controller", layout="wide")
     init_ui_state()
@@ -1507,8 +1555,7 @@ def main():
 
     current = st.session_state.current_step
     step_def = STEP_DEFS[current]
-    progress = (current + 1) / len(STEP_DEFS)
-    st.progress(progress)
+    render_nav_bar(current, position="top")
     st.subheader(step_def["title"])
 
     if step_def["key"] == "geometry":
@@ -1519,6 +1566,8 @@ def main():
         render_step_solver(state)
     elif step_def["key"] == "output":
         render_step_output(state)
+    elif step_def["key"] == "results":
+        render_run_result()
 
     maybe_autosave()
     issues = validate_ui_state(state)
@@ -1533,23 +1582,25 @@ def main():
         issues, ["geometry", "operating", "channels", "solver", "output"]
     )
 
+    render_nav_bar(current, position="bottom")
     st.divider()
-    c_nav1, c_nav2, _ = st.columns([1, 1, 2])
-    if current > 0 and c_nav1.button("Back"):
+    _, c_nav1, c_nav2, _ = st.columns([2, 1, 1, 2])
+    if current > 0 and c_nav1.button("← Back"):
         st.session_state.current_step -= 1
         st.rerun()
-    if current < len(STEP_DEFS) - 1:
-        if c_nav2.button("Next", disabled=has_error_current):
-            st.session_state.current_step += 1
-            st.rerun()
-    else:
+    if step_def["key"] == "confirm":
         if c_nav2.button("Run Simulation", type="primary", disabled=has_error_global):
             with st.spinner("Running solver..."):
                 st.session_state.run_result = run_simulation(state)
+            st.session_state.last_run_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             maybe_autosave(force=True)
+            st.session_state.current_step = len(STEP_DEFS) - 1   # jump to Results page
+            st.rerun()
+    elif step_def["key"] != "results":
+        if c_nav2.button("Next →", disabled=has_error_current):
+            st.session_state.current_step += 1
             st.rerun()
 
-    render_run_result()
 
 
 if __name__ == "__main__":

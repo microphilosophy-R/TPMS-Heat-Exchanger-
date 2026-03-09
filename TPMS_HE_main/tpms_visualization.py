@@ -202,13 +202,18 @@ class TPMSVisualizer:
         ax2.set_title('(b) Ortho-Para Conversion')
         ax2.legend()
 
-        # --- 3. Hydraulic Performance (Pressure) ---
+        # --- 3. Hydraulic Pressure Loss ---
         ax3 = fig.add_subplot(gs[1, 0])
-        ax3.plot(x_pos, self.he.Ph / 1e6, color=self.colors['hot'], label='Hot')
-        ax3.plot(x_pos, self.he.Pc / 1e6, color=self.colors['cold'], label='Cold')
+        # Cumulative pressure drop from each stream's inlet [kPa]
+        # Hot flows 0→N: loss increases left to right
+        # Cold flows N→0: loss increases right to left
+        dP_hot_profile  = (self.he.Ph[0]  - self.he.Ph)  / 1e3
+        dP_cold_profile = (self.he.Pc[-1] - self.he.Pc) / 1e3
+        ax3.plot(x_pos, dP_hot_profile,  color=self.colors['hot'],  label=f'Hot  (total {dP_hot_profile[-1]:.2f} kPa)')
+        ax3.plot(x_pos, dP_cold_profile, color=self.colors['cold'], label=f'Cold (total {dP_cold_profile[0]:.2f} kPa)')
         ax3.set_xlabel(r'Normalized Position ($\xi = x/L$)')
-        ax3.set_ylabel('Pressure (MPa)')
-        ax3.set_title('(c) Pressure Profiles')
+        ax3.set_ylabel(r'Hydraulic Pressure Loss $\Delta P$ (kPa)')
+        ax3.set_title('(c) Hydraulic Pressure Loss')
         ax3.legend()
 
         # --- 4. Heat Transfer Coefficients (Nusselt) ---
@@ -232,6 +237,8 @@ class TPMSVisualizer:
         ax5.plot(x_elem, self.he.elem_c['f'], color=self.colors['cold'], label='Cold')
         ax5.set_xlabel('Normalized Position ($x/L$)')
         ax5.set_ylabel('Friction Factor $f$ (-)')
+        ax5.set_title('(e) Friction Factor Profile')
+        ax5.legend()
 
         # 6. Performance Summary Text (Table-like)
         ax6 = fig.add_subplot(gs[2, 1])
@@ -243,31 +250,100 @@ class TPMSVisualizer:
         # plt.show() # Optional: Comment out if running in batch mode without display
 
     def _add_summary_text(self, ax):
-        """Add summary metrics to the plot"""
-        # Calculate totals from Solver State
-        Q_total = np.sum(self.he.Q)
+        """Add summary metrics with exergy analysis to the plot"""
+        he = self.he
+        # Use inlet/outlet enthalpy balance (includes conversion heat)
+        mh = he.streams['hot']['m']
+        Q_total = mh * (he.props_h['h'][0] - he.props_h['h'][-1])
 
-        # Metrics
-        x_in = self.he.xh[0]
-        x_out = self.he.xh[-1]
+        # --- Temperature ---
+        Th_in,  Th_out = he.Th[0],  he.Th[-1]
+        Tc_in,  Tc_out = he.Tc[-1], he.Tc[0]   # cold inlet = Tc[-1] (counter-flow)
+        dTh = Th_in  - Th_out
+        dTc = Tc_out - Tc_in
+        LMTD_num = (Th_in - Tc_out) - (Th_out - Tc_in)
+        LMTD_den = np.log(max((Th_in - Tc_out) / max(Th_out - Tc_in, 1e-6), 1e-6))
+        LMTD = abs(LMTD_num / LMTD_den) if abs(LMTD_den) > 1e-9 else abs(LMTD_num)
+
+        # --- Pressure ---
+        Ph_in,  Ph_out = he.Ph[0]  / 1e6, he.Ph[-1]  / 1e6   # MPa
+        Pc_in,  Pc_out = he.Pc[-1] / 1e6, he.Pc[0]   / 1e6
+        dP_hot  = (he.Ph[0]  - he.Ph[-1])  / 1e3   # kPa
+        dP_cold = (he.Pc[-1] - he.Pc[0])   / 1e3
+
+        # --- Para-H2 ---
+        x_in  = he.xh[0]
+        x_out = he.xh[-1]
         try:
-            x_eq_out = self.h2_props.get_equilibrium_fraction(self.he.Th[-1])
-            eff_conv = (x_out - x_in) / (x_eq_out - x_in) * 100 if (x_eq_out - x_in) != 0 else 0
+            x_eq_in  = self.h2_props.get_equilibrium_fraction(Th_in)
+            x_eq_out = self.h2_props.get_equilibrium_fraction(Th_out)
+            eff_conv = (x_out - x_in) / (x_eq_out - x_in) * 100 if abs(x_eq_out - x_in) > 1e-6 else 0.0
         except:
-            eff_conv = 0.0
+            x_eq_in, x_eq_out, eff_conv = 0.0, 0.0, 0.0
 
-        dP_hot = (self.he.Ph[0] - self.he.Ph[-1]) / 1e3  # kPa
+        # --- Mean U ---
+        mean_U = float(np.mean(he.U))
 
-        txt = (
-                f"Load: {Q_total:.1f} W\n" +
-                f"Conv Eff: {eff_conv:.1f}%\n" +
-                f"$\\Delta P_h$: {dP_hot:.1f} kPa\n" +
-                f"Effectiveness: {Q_total/self.he.Q_max_capacity*100:.1f}%"
-        )
+        lines = [
+            r"$\bf{Thermo-Hydraulic\ Summary}$",
+            "",
+            r"$\it{Temperatures\ (K)}$",
+            f"  Hot:   {Th_in:.2f} \u2192 {Th_out:.2f}  (\u0394T = {dTh:.2f} K)",
+            f"  Cold:  {Tc_in:.2f} \u2192 {Tc_out:.2f}  (\u0394T = {dTc:.2f} K)",
+            f"  LMTD:  {LMTD:.2f} K",
+            "",
+            r"$\it{Pressures}$",
+            f"  Hot:   {Ph_in:.3f} \u2192 {Ph_out:.3f} MPa  (\u0394P = {dP_hot:.2f} kPa)",
+            f"  Cold:  {Pc_in:.3f} \u2192 {Pc_out:.3f} MPa  (\u0394P = {dP_cold:.2f} kPa)",
+            "",
+            r"$\it{Para-H_2\ Fraction}$",
+            f"  Actual:  {x_in:.4f} \u2192 {x_out:.4f}",
+            f"  Equil.:  {x_eq_in:.4f} \u2192 {x_eq_out:.4f}",
+            f"  Conv. eff.: {eff_conv:.1f}%",
+            "",
+            r"$\it{Heat\ Transfer}$",
+            f"  Q total:       {Q_total:.1f} W",
+            f"  Effectiveness: {Q_total / max(he.Q_max_capacity, 1e-12) * 100:.1f}%",
+            f"  Mean U:        {mean_U:.1f} W/m\u00b2K",
+        ]
 
-        ax.text(0.05, 0.5, txt, transform=ax.transAxes,
-                verticalalignment='center', linespacing=1.8,
-                fontsize=14, bbox=dict(facecolor='white', alpha=0.9, edgecolor='gray', boxstyle='round,pad=0.5'))
+        perf = getattr(he, 'perf', {})
+        if perf:
+            dest_grand  = perf.get('Ex_dest_grand',    0.0)
+            dest_HT_tot = perf.get('Ex_dest_HT_tot',   0.0)
+            dest_dP_tot = perf.get('Ex_dest_dP_tot',   0.0)
+            dest_ch_tot = perf.get('Ex_dest_chem_tot', 0.0)
+            pct_HT   = 100.0 * dest_HT_tot / max(dest_grand, 1e-12)
+            pct_dP   = 100.0 * dest_dP_tot / max(dest_grand, 1e-12)
+            pct_chem = 100.0 * dest_ch_tot / max(dest_grand, 1e-12)
+            Ex_He    = perf.get('Ex_He_consumed',   perf.get('Ex_cold_net', 0.0))
+            Ex_H2    = perf.get('Ex_H2_total_gain', perf.get('Ex_hot_net',  0.0))
+            Ex_chem  = perf.get('Ex_chem_net', 0.0)
+            lines += [
+                "",
+                r"$\bf{Exergy\ Analysis}$" + f"  (T\u2080={perf['T0']:.0f} K)",
+                f"  \u03b7_ex (HX, thermal): {perf['eta_ex'] * 100:.1f}%",
+                f"  He cold ex consumed: {Ex_He:.4f} W",
+                f"  H2 total ex gained:  {Ex_H2:.4f} W",
+                f"    \u21b3 chem contrib:   {Ex_chem:.4f} W",
+                f"  Ex destr (HT+\u0394P):   {dest_HT_tot + dest_dP_tot:.4f} W",
+                f"    \u21b3 Heat xfer \u0394T: {dest_HT_tot:.4f} W  ({pct_HT:.0f}%)",
+                f"    \u21b3 Press. drop \u0394P:{dest_dP_tot:.4f} W  ({pct_dP:.0f}%)",
+                f"    \u21b3 Ortho-para:  {dest_ch_tot:.4f} W  ({pct_chem:.0f}%)",
+                f"  S_gen total:   {perf['S_gen_total'] * 1e3:.3f} mW/K",
+                f"    \u21b3 \u0394T: {perf.get('S_gen_HT_tot',0.0)*1e3:.3f}"
+                f"  \u0394P: {perf.get('S_gen_dP_tot',0.0)*1e3:.3f}"
+                f"  chem: {perf.get('S_gen_chem_tot',0.0)*1e3:.3f} mW/K",
+                "",
+                r"$\bf{Transfer\ Performance}$",
+                f"  j_mean  h/c:   {perf['j_mean_h']:.4f} / {perf['j_mean_c']:.4f}",
+                f"  PEC_mean h/c:  {perf['PEC_mean_h']:.4f} / {perf['PEC_mean_c']:.4f}",
+            ]
+
+        txt = "\n".join(lines)
+        ax.text(0.05, 0.97, txt, transform=ax.transAxes,
+                verticalalignment='top', linespacing=1.45,
+                fontsize=8.5, bbox=dict(facecolor='white', alpha=0.9, edgecolor='gray', boxstyle='round,pad=0.5'))
 
     def plot_resistance_pie(self, save_path=None):
         """Pie chart of element-averaged thermal resistance breakdown.
@@ -389,17 +465,29 @@ class TPMSVisualizer:
         hot_struct  = self.he.streams['hot']['tpms']
         cold_struct = self.he.streams['cold']['tpms']
 
-        # --- (a) Exergy destruction profile ---
+        # --- (a) Exergy balance — cryogenic convention ---
+        # Both streams operate below ambient T0. Roles:
+        #   Refrigerant (cold stream, warmer) SUPPLIES cold exergy as it warms.
+        #   Product     (hot  stream, cooler) RECEIVES cold exergy as it cools further.
+        # Destruction is decomposed: heat-transfer ΔT (red fill) + ortho-para rxn (orange fill).
         ax = axes[0, 0]
-        ax.plot(x_elem, perf['Ex_hot_lost']  * 1e3, color=col_hot,  lw=1.5,
-                label=f"Hot supplied ({hot_struct})")
-        ax.plot(x_elem, perf['Ex_cold_gain'] * 1e3, color=col_cold, lw=1.5,
-                label=f"Cold gained ({cold_struct})")
-        ax.fill_between(x_elem, np.maximum(perf['Ex_dest'], 0) * 1e3,
-                         color=col_dest, alpha=0.35, label="Destruction")
+        ax.plot(x_elem, perf['Ex_cold_supplied'], color=col_cold, lw=1.5,
+                label=f"Refrigerant supplied ({cold_struct})")
+        ax.plot(x_elem, perf['Ex_hot_received'],  color=col_hot,  lw=1.5,
+                label=f"Product received ({hot_struct})")
+        # Stacked destruction: heat-transfer (bottom) then chemical (on top)
+        dest_HT   = np.maximum(perf['Ex_dest_HT'],  0)
+        dest_chem = np.maximum(perf['Ex_dest_chem'], 0)
+        ax.fill_between(x_elem, dest_HT,
+                        color='#d62728', alpha=0.40,
+                        label=r'Dest: $\Delta T$ (heat transfer)')
+        ax.fill_between(x_elem, dest_HT + dest_chem,
+                        dest_HT,
+                        color='#ff7f0e', alpha=0.40,
+                        label=r'Dest: ortho-para rxn')
         ax.set_xlabel(r'Normalised position $\xi$')
-        ax.set_ylabel('Exergy flux [mW]')
-        ax.set_title('(a) Elemental Exergy Balance')
+        ax.set_ylabel('Exergy flux [W]')
+        ax.set_title(f'(a) Elemental Exergy Balance  ($T_0={perf["T0"]:.0f}$ K, ambient)')
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
 
@@ -434,16 +522,40 @@ class TPMSVisualizer:
         # --- (d) Summary table ---
         ax = axes[1, 1]
         ax.axis('off')
-        Q_total = float(np.sum(self.he.Q))
+        # Use inlet/outlet enthalpy balance (includes conversion heat)
+        _mh = self.he.streams['hot']['m']
+        Q_total = float(_mh * (self.he.props_h['h'][0] - self.he.props_h['h'][-1]))
         effectiveness = Q_total / max(self.he.Q_max_capacity, 1e-12) * 100
+
+        dest_grand      = perf.get('Ex_dest_grand',    0.0)
+        dest_HT_tot     = perf.get('Ex_dest_HT_tot',   0.0)
+        dest_dP_tot     = perf.get('Ex_dest_dP_tot',   0.0)
+        dest_ch_tot     = perf.get('Ex_dest_chem_tot', 0.0)
+        pct_HT   = 100.0 * dest_HT_tot  / max(dest_grand, 1e-12)
+        pct_dP   = 100.0 * dest_dP_tot  / max(dest_grand, 1e-12)
+        pct_chem = 100.0 * dest_ch_tot  / max(dest_grand, 1e-12)
+
+        Ex_He   = perf.get('Ex_He_consumed',   perf.get('Ex_cold_net', 0.0))
+        Ex_H2   = perf.get('Ex_H2_total_gain', perf.get('Ex_hot_net',  0.0))
+        Ex_chem = perf.get('Ex_chem_net',      0.0)
+        ex_bal  = perf.get('Ex_balance_residual', Ex_He - Ex_H2 - dest_grand)
+
         summary_lines = [
-            r"$\bf{Exergy\ Analysis}$",
-            f"  Dead-state T₀ = {perf['T0']:.2f} K  (Tc_in)",
-            f"  Ex supplied (hot)  = {perf['Ex_hot_total']*1e3:.2f} mW",
-            f"  Ex recovered (cold) = {perf['Ex_cold_total']*1e3:.2f} mW",
-            f"  Ex destroyed       = {float(np.sum(np.maximum(perf['Ex_dest'],0)))*1e3:.2f} mW",
-            f"  η_ex               = {perf['eta_ex']*100:.1f}%",
-            f"  S_gen_total        = {perf['S_gen_total']*1e3:.3f} mW/K",
+            r"$\bf{Exergy\ Analysis\ (Gouy-Stodola,\ 3\ sources)}$",
+            f"  Dead-state T\u2080 = {perf['T0']:.1f} K  (ambient)",
+            f"  He cold exergy consumed  = {Ex_He:.4f} W",
+            f"  H2 total exergy gained   = {Ex_H2:.4f} W",
+            f"    \u21b3 H2 chem. contribution = {Ex_chem:.4f} W",
+            f"  Ex destroyed (HT + \u0394P)   = {dest_HT_tot + dest_dP_tot:.4f} W",
+            f"    \u21b3 Heat transfer \u0394T     = {dest_HT_tot:.4f} W  ({pct_HT:.0f}%)",
+            f"    \u21b3 Pressure drop \u0394P     = {dest_dP_tot:.4f} W  ({pct_dP:.0f}%)",
+            f"    \u21b3 Ortho-para rxn        = {dest_ch_tot:.4f} W  ({pct_chem:.0f}%)",
+            f"  Balance residual         = {ex_bal:.4f} W  (\u2248 0)",
+            f"  \u03b7_ex (HX, thermal)       = {perf['eta_ex']*100:.1f}%  (\u2264 100%)",
+            f"  S_gen total  = {perf['S_gen_total']*1e3:.3f} mW/K",
+            f"    \u21b3 Heat xfer: {perf.get('S_gen_HT_tot', 0.0)*1e3:.3f}"
+            f"  | \u0394P: {perf.get('S_gen_dP_tot', 0.0)*1e3:.3f}"
+            f"  | chem: {perf.get('S_gen_chem_tot', 0.0)*1e3:.3f} mW/K",
             "",
             r"$\bf{Thermo-Hydraulic\ Performance}$",
             f"  Effectiveness       = {effectiveness:.1f}%",

@@ -237,8 +237,10 @@ class PackedBedTPMSModel:
     def wall_htc_dixon(self, Re_p, Pr, k_f, Nu_w0=20.0):
         """
         Dixon壁面传热关联式 (Eqs 0.4, 0.5):
-            Nu_w = Nu_{w,0} + 110.3·Pr^(1/3)·Re^0.75 + 10.054·Re·Pr
+            Nu_w = Nu_{w,0} + 1 / (1/(0.3·Pr^(1/3)·Re^0.75) + 1/(0.054·Re·Pr))
             h_w  = Nu_w · λ_h / d_p
+
+        两项取调和平均 (并联热阻形式), 分别代表对流膜传热与湍流弥散传热的极限。
 
         Parameters
         ----------
@@ -252,7 +254,9 @@ class PackedBedTPMSModel:
         h_w : float   壁面传热系数 [W/m²·K]
         Nu_w : float  壁面Nusselt数 (基于d_p)
         """
-        Nu_w = Nu_w0 + 110.3 * Pr ** (1.0 / 3.0) * Re_p ** 0.75 + 10.054 * Re_p * Pr
+        term1 = 0.3 * Pr ** (1.0 / 3.0) * Re_p ** 0.75
+        term2 = 0.054 * Re_p * Pr
+        Nu_w = Nu_w0 + 1.0 / (1.0 / max(term1, 1e-30) + 1.0 / max(term2, 1e-30))
         h_w = Nu_w * k_f / self.d_p
         return h_w, Nu_w
 

@@ -6,12 +6,17 @@ Content:
 """
 
 import copy
+import sys
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from scipy.optimize import fsolve
 import warnings
 import os
+
+# Ensure UTF-8 output on Windows terminals that default to GBK/CP936
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 
 # Import local modules
 from tpms_correlations import TPMSCorrelations
@@ -477,8 +482,10 @@ class TPMSHeatExchanger:
         try:
             # Hot inlet properties
             h_h_in = self.h2_props.get_properties(ops['Th_in'], ops['Ph_in'], self.streams['hot']['species'], ops['xh_in'])['h']
-            # Hot fluid at cold inlet temp (max cooling)
-            h_h_min = self.h2_props.get_properties(ops['Tc_in'], ops['Ph_in'], self.streams['hot']['species'], ops['xh_in'])['h']
+            # Hot fluid at cold inlet temp at equilibrium composition (max cooling + max conversion)
+            # Using x_eq(Tc_in) ensures Q_max_hot ≥ Q_actual → ε ≤ 100% even with ortho-para conversion heat
+            xh_eq_at_Tc = float(self.h2_props.get_equilibrium_fraction(ops['Tc_in']))
+            h_h_min = self.h2_props.get_properties(ops['Tc_in'], ops['Ph_in'], self.streams['hot']['species'], xh_eq_at_Tc)['h']
 
             # Cold inlet properties
             h_c_in = self.h2_props.get_properties(ops['Tc_in'], ops['Pc_in'], self.streams['cold']['species'])['h']
@@ -488,7 +495,16 @@ class TPMSHeatExchanger:
             Q_max_hot = self.streams['hot']['m'] * (h_h_in - h_h_min)
             Q_max_cold = self.streams['cold']['m'] * (h_c_max - h_c_in)
 
-            self.Q_max_capacity = min(Q_max_hot, Q_max_cold)
+            # When ortho-para conversion is active, the conversion is an internal heat
+            # source in the hot stream — the cold outlet can exceed Th_in, so Q_max_cold
+            # is not the binding constraint.  Use Q_max_hot (full enthalpy including
+            # conversion to equilibrium at Tc_in) as the sole capacity bound.
+            # For bare channels (no conversion kinetics) use the standard min() rule.
+            conversion_active = (
+                'hydrogen' in self.streams['hot']['species'] and
+                self.streams['hot']['mode'] == 'packed'
+            )
+            self.Q_max_capacity = Q_max_hot if conversion_active else min(Q_max_hot, Q_max_cold)
         except:
             self.Q_max_capacity = 1e6 # Fallback
 
@@ -949,18 +965,30 @@ class TPMSHeatExchanger:
         return False
 
     def _compute_performance_metrics(self):
-        """Compute post-processing performance indicators:
-        - Exergy efficiency η_ex and entropy generation S_gen (using T0 = Tc_in)
-        - Colburn j-factor and PEC = j / f^(1/3) per element and channel mean
-        Results stored in self.perf dict.
+        """Compute post-processing performance indicators.
+
+        Exergy analysis — Gouy-Stodola decomposition for a cryogenic liquefaction HX
+        -------------------------------------------------------------------------------
+        Dead state: T0 = T_ambient (default 298 K), NOT Tc_in.  Both streams operate
+        below ambient, so their cold exergy is positive and large relative to 298 K.
+
+        Physical roles in a sub-ambient counter-flow cooler (element i: hot i→i+1, cold i+1→i):
+          • Refrigerant (cold stream, warmer of the two) SUPPLIES cold exergy as it warms.
+          • Product    (hot  stream, cooled to lower T) RECEIVES cold exergy as it cools.
+
+        Three irreversibility sources (Gouy-Stodola, T0 × Sgen):
+          1. Heat transfer across finite ΔT  → Ex_dest_HT
+          2. Pressure drop (negligible)      → Ex_dest_dP  (= 0)
+          3. Ortho-para chemical conversion  → Ex_dest_chem  (packed-bed hot channel)
         """
         ops = self.config['operating']
-        T0 = float(ops['Tc_in'])   # dead-state = cold inlet
+        # --- Dead state: ambient temperature (NOT Tc_in) ---
+        T0 = float(ops.get('T_ambient', 298.0))
         mh = self.streams['hot']['m']
         mc = self.streams['cold']['m']
         N = self.N
 
-        # --- 1. j-factor and PEC (per element) ---
+        # --- 1. j-factor and PEC (per element) — unchanged ---
         j_h   = np.zeros(N)
         j_c   = np.zeros(N)
         PEC_h = np.zeros(N)
@@ -977,70 +1005,186 @@ class TPMSHeatExchanger:
             PEC_h[i] = j_h[i] / f_h**(1.0/3.0)
             PEC_c[i] = j_c[i] / f_c**(1.0/3.0)
 
-        # --- 2. Exergy per node (specific flow exergy relative to dead state) ---
-        # ex_i = (h_i - h0) - T0*(s_i - s0)
-        # Dead-state reference: hot at (T0, Ph_in), cold at (T0, Pc_in)
+        # --- 2. Dead-state reference properties ---
+        # Hot dead-state: T0 at inlet pressure, equilibrium para-fraction at T0
         try:
+            x0_h = float(self.h2_props.get_equilibrium_fraction(T0))  # ≈0.25 at 298 K
             ref_h = self.h2_props.get_properties(
-                T0, ops['Ph_in'], self.streams['hot']['species'], ops.get('xh_in', 0.5))
-            h0_h = ref_h['h']
-            s0_h = ref_h.get('s', 0.0)
+                T0, ops['Ph_in'], self.streams['hot']['species'], x0_h)
+            h0_h, s0_h = ref_h['h'], ref_h.get('s', 0.0)
         except Exception:
             h0_h, s0_h = 0.0, 0.0
 
         try:
             ref_c = self.h2_props.get_properties(
                 T0, ops['Pc_in'], self.streams['cold']['species'])
-            h0_c = ref_c['h']
-            s0_c = ref_c.get('s', 0.0)
+            h0_c, s0_c = ref_c['h'], ref_c.get('s', 0.0)
         except Exception:
             h0_c, s0_c = 0.0, 0.0
 
-        ex_h = np.zeros(N + 1)
-        ex_c = np.zeros(N + 1)
-        for i in range(N + 1):
-            ex_h[i] = (self.props_h['h'][i] - h0_h) - T0 * (self.props_h['s'][i] - s0_h)
-            ex_c[i] = (self.props_c['h'][i] - h0_c) - T0 * (self.props_c['s'][i] - s0_c)
+        # --- 3. Nodal flow exergy  ex = (h - h0) - T0*(s - s0)  [J/kg] ---
+        # With T0 = 298 K and streams at 66-96 K: s < s0, h < h0,
+        # but −T0*(s−s0) dominates → ex_i > 0  (correct cold exergy sign)
+        ex_h = (self.props_h['h'] - h0_h) - T0 * (self.props_h['s'] - s0_h)
+        ex_c = (self.props_c['h'] - h0_c) - T0 * (self.props_c['s'] - s0_c)
 
-        # --- 3. Elemental exergy destruction and entropy generation ---
-        # Hot flows 0 → N (node 0 = inlet, node N = outlet)
-        # Cold flows N → 0 (node N = inlet, node 0 = outlet)
-        Ex_hot_lost  = np.zeros(N)   # exergy given up by hot [W]
-        Ex_cold_gain = np.zeros(N)   # exergy received by cold [W]
-        Ex_dest      = np.zeros(N)   # elemental destruction [W]
+        # --- 4. Per-element exergy balance + Gouy-Stodola decomposition ---
+        # Counter-flow: hot 0→N, cold N→0
+        # Refrigerant (cold stream) supplies cold exergy  [> 0 when it warms up]
+        # Product     (hot  stream) receives cold exergy  [> 0 when it cools down]
+        Ex_cold_supplied = np.zeros(N)   # [W]  legacy per-element tracker
+        Ex_hot_received  = np.zeros(N)   # [W]  legacy per-element tracker
+        Ex_dest_HT       = np.zeros(N)   # Source 1: finite-ΔT heat transfer [W]
+        Ex_dest_chem     = np.zeros(N)   # Source 3: ortho-para conversion   [W]
+        Ex_dest_dP       = np.zeros(N)   # Source 2: pressure drop           [W]
+        S_gen_HT         = np.zeros(N)   # [W/K]
+        S_gen_dP         = np.zeros(N)   # [W/K]  — NEW: pressure-drop Sgen
+        S_gen_chem       = np.zeros(N)   # [W/K]
+
         for i in range(N):
-            Ex_hot_lost[i]  = mh * (ex_h[i]     - ex_h[i + 1])    # hot loses exergy downstream
-            Ex_cold_gain[i] = mc * (ex_c[i + 1] - ex_c[i])        # cold gains exergy upstream
-            Ex_dest[i] = Ex_hot_lost[i] - Ex_cold_gain[i]
+            # Legacy per-element exergy trackers (for backward-compat output)
+            Ex_cold_supplied[i] = mc * (ex_c[i + 1] - ex_c[i])
+            Ex_hot_received[i]  = mh * (ex_h[i + 1] - ex_h[i])
 
-        Ex_hot_total  = float(np.sum(np.maximum(Ex_hot_lost,  0.0)))
-        Ex_cold_total = float(np.sum(np.maximum(Ex_cold_gain, 0.0)))
-        Ex_dest_total = float(np.sum(np.maximum(Ex_dest,      0.0)))
+            Th_avg = 0.5 * (self.Th[i] + self.Th[i + 1])
+            Tc_avg = 0.5 * (self.Tc[i] + self.Tc[i + 1])
 
-        eta_ex = Ex_cold_total / max(Ex_hot_total, 1e-12)
-        S_gen = Ex_dest / max(T0, 1e-6)      # per element [W/K]
-        S_gen_total = float(np.sum(np.maximum(S_gen, 0.0)))
+            # Source 1 — Heat-transfer irreversibility (Gouy-Stodola)
+            if Th_avg > Tc_avg > 0.0:
+                S_gen_HT[i] = self.Q[i] * (1.0 / Tc_avg - 1.0 / Th_avg)
+            Ex_dest_HT[i] = T0 * max(S_gen_HT[i], 0.0)
+
+            # Source 2 — Pressure-drop irreversibility: ṁ/(ρ·T) × |ΔP|
+            # Hot flows 0→N: pressure drops, dP_h = Ph[i] - Ph[i+1] ≥ 0
+            # Cold flows N→0: pressure drops, dP_c = Pc[i+1] - Pc[i] ≥ 0
+            rho_h_avg = 0.5 * (self.props_h['rho'][i] + self.props_h['rho'][i + 1])
+            rho_c_avg = 0.5 * (self.props_c['rho'][i] + self.props_c['rho'][i + 1])
+            dP_h = max(self.Ph[i] - self.Ph[i + 1], 0.0)
+            dP_c = max(self.Pc[i + 1] - self.Pc[i], 0.0)
+            S_gen_dP_h_i = mh * dP_h / (max(rho_h_avg, 1e-12) * max(Th_avg, 1.0))
+            S_gen_dP_c_i = mc * dP_c / (max(rho_c_avg, 1e-12) * max(Tc_avg, 1.0))
+            S_gen_dP[i]  = S_gen_dP_h_i + S_gen_dP_c_i
+            Ex_dest_dP[i] = T0 * S_gen_dP[i]
+
+            # Source 3 — Ortho-para chemical conversion irreversibility
+            # Reaction affinity: A = -ΔG_rxn = R·T·ln[x_eq·(1-x) / (x·(1-x_eq))]
+            # This is exact: A = 0 at equilibrium (x = x_eq), A > 0 for x < x_eq.
+            # Ṡ_gen,chem = ṁ·Δx·A / T  [W/K]
+            dx_i = self.xh[i + 1] - self.xh[i]
+            if dx_i > 1e-9:
+                T_e = 0.5 * (self.Th[i] + self.Th[i + 1])
+                x_e = 0.5 * (self.xh[i] + self.xh[i + 1])
+                try:
+                    x_eq_e = float(self.h2_props.get_equilibrium_fraction(T_e))
+                    if 0.0 < x_e < 1.0 and 0.0 < x_eq_e < 1.0:
+                        # ΔG_rxn [J/kg]: < 0 when x < x_eq (spontaneous ortho→para)
+                        dg_rxn = self.h2_props.R_SPECIFIC * T_e * np.log(
+                            (x_e * (1.0 - x_eq_e)) / (x_eq_e * (1.0 - x_e))
+                        )
+                        S_gen_c = -mh * dx_i * dg_rxn / max(T_e, 1.0)
+                        S_gen_chem[i] = S_gen_c
+                        Ex_dest_chem[i] = T0 * max(S_gen_c, 0.0)
+                except Exception:
+                    pass
+
+        Ex_dest_total = Ex_dest_HT + Ex_dest_chem + Ex_dest_dP
+
+        # --- 5. Global totals ---
+        Ex_dest_HT_tot   = float(np.sum(Ex_dest_HT))
+        Ex_dest_chem_tot = float(np.sum(Ex_dest_chem))
+        Ex_dest_dP_tot   = float(np.sum(Ex_dest_dP))
+        Ex_dest_grand    = Ex_dest_HT_tot + Ex_dest_chem_tot + Ex_dest_dP_tot
+
+        # Global entropy totals (all irreversibility sources)
+        S_gen_HT_tot   = float(np.sum(np.maximum(S_gen_HT,   0.0)))
+        S_gen_dP_tot   = float(np.sum(np.maximum(S_gen_dP,   0.0)))
+        S_gen_chem_tot = float(np.sum(np.maximum(S_gen_chem, 0.0)))
+        S_gen_total    = S_gen_HT_tot + S_gen_dP_tot + S_gen_chem_tot
+
+        # --- 5b. Corrected exergetic efficiency (always ≤ 1) ---
+        # He (cold stream) is the sole external exergy supplier.
+        # Its cold exergy consumed = mc*(ex_c[inlet] − ex_c[outlet]) = mc*(ex_c[-1] − ex_c[0]).
+        # The HX efficiency is evaluated for the *heat-transfer* function only:
+        #   η_ex = 1 − T0·(Ṡ_gen_HT + Ṡ_gen_dP) / Ex_He_consumed  ∈ [0, 1]
+        # Chemical exergy from ortho-para conversion is a separate energy source
+        # and is reported independently as Ex_chem_net.
+        Ex_He_consumed   = mc * float(ex_c[-1] - ex_c[0])   # always > 0
+        Ex_H2_total_gain = mh * float(ex_h[-1] - ex_h[0])   # thermal + chemical
+
+        S_gen_HT_dP_tot  = S_gen_HT_tot + S_gen_dP_tot
+        Ex_dest_thermal  = T0 * S_gen_HT_dP_tot
+
+        eta_ex = float(np.clip(
+            1.0 - Ex_dest_thermal / max(Ex_He_consumed, 1e-12),
+            0.0, 1.0))
+
+        # Chemical exergy net contribution (residual from the balance)
+        Ex_chem_net = Ex_H2_total_gain - (Ex_He_consumed - Ex_dest_thermal)
+
+        # Global balance residual — should be ≈ 0 if the property model is
+        # thermodynamically consistent (validates the Gouy-Stodola sum).
+        Ex_balance_residual = (Ex_He_consumed + Ex_chem_net
+                               - Ex_H2_total_gain - Ex_dest_grand)
+
+        # --- Legacy aliases (backward compatibility) ---
+        Ex_cold_net  = mc * float(ex_c[-1] - ex_c[0])   # = Ex_He_consumed
+        Ex_hot_net   = mh * float(ex_h[-1] - ex_h[0])   # = Ex_H2_total_gain
+        Ex_balance   = Ex_He_consumed - Ex_H2_total_gain - Ex_dest_grand
+        Ex_hot_lost  = -Ex_hot_received
+        Ex_cold_gain = Ex_cold_supplied
+        Ex_dest      = Ex_dest_total
+        S_gen        = S_gen_HT + S_gen_dP + S_gen_chem  # total per-element
 
         self.perf = {
-            'T0':           T0,
-            'ex_h':         ex_h,
-            'ex_c':         ex_c,
-            'Ex_hot_lost':  Ex_hot_lost,
-            'Ex_cold_gain': Ex_cold_gain,
-            'Ex_dest':      Ex_dest,
-            'Ex_hot_total': Ex_hot_total,
-            'Ex_cold_total': Ex_cold_total,
-            'eta_ex':        eta_ex,
-            'S_gen':         S_gen,
-            'S_gen_total':   S_gen_total,
-            'j_h':           j_h,
-            'j_c':           j_c,
-            'PEC_h':         PEC_h,
-            'PEC_c':         PEC_c,
-            'j_mean_h':      float(np.mean(j_h)),
-            'j_mean_c':      float(np.mean(j_c)),
-            'PEC_mean_h':    float(np.mean(PEC_h)),
-            'PEC_mean_c':    float(np.mean(PEC_c)),
+            'T0':                    T0,
+            'ex_h':                  ex_h,
+            'ex_c':                  ex_c,
+            # --- Corrected exergy efficiency (always ≤ 1) ---
+            'eta_ex':                eta_ex,
+            'Ex_He_consumed':        Ex_He_consumed,
+            'Ex_H2_total_gain':      Ex_H2_total_gain,
+            'Ex_chem_net':           Ex_chem_net,
+            'Ex_dest_thermal':       Ex_dest_thermal,
+            'Ex_balance_residual':   Ex_balance_residual,
+            # --- Per-element arrays ---
+            'Ex_cold_supplied':      Ex_cold_supplied,
+            'Ex_hot_received':       Ex_hot_received,
+            'Ex_dest_HT':            Ex_dest_HT,
+            'Ex_dest_dP':            Ex_dest_dP,
+            'Ex_dest_chem':          Ex_dest_chem,
+            'Ex_dest_total':         Ex_dest_total,
+            # --- Global totals (all three sources) ---
+            'Ex_dest_HT_tot':        Ex_dest_HT_tot,
+            'Ex_dest_dP_tot':        Ex_dest_dP_tot,
+            'Ex_dest_chem_tot':      Ex_dest_chem_tot,
+            'Ex_dest_grand':         Ex_dest_grand,
+            # --- Entropy generation ---
+            'S_gen_HT':              S_gen_HT,
+            'S_gen_dP':              S_gen_dP,
+            'S_gen_chem':            S_gen_chem,
+            'S_gen':                 S_gen,
+            'S_gen_HT_tot':          S_gen_HT_tot,
+            'S_gen_dP_tot':          S_gen_dP_tot,
+            'S_gen_chem_tot':        S_gen_chem_tot,
+            'S_gen_total':           S_gen_total,
+            # --- Legacy aliases (backward compatibility) ---
+            'Ex_cold_net':           Ex_cold_net,
+            'Ex_hot_net':            Ex_hot_net,
+            'Ex_cold_total':         Ex_cold_net,
+            'Ex_hot_total':          Ex_hot_net,
+            'Ex_balance':            Ex_balance,
+            'Ex_hot_lost':           Ex_hot_lost,
+            'Ex_cold_gain':          Ex_cold_gain,
+            'Ex_dest':               Ex_dest,
+            # --- j-factor / PEC ---
+            'j_h':                   j_h,
+            'j_c':                   j_c,
+            'PEC_h':                 PEC_h,
+            'PEC_c':                 PEC_c,
+            'j_mean_h':              float(np.mean(j_h)),
+            'j_mean_c':              float(np.mean(j_c)),
+            'PEC_mean_h':            float(np.mean(PEC_h)),
+            'PEC_mean_c':            float(np.mean(PEC_c)),
         }
 
     def _print_results(self):
@@ -1067,12 +1211,13 @@ class TPMSHeatExchanger:
         print(f"  Hot:  {self.Ph[0]/1e6:.3f} MPa → {self.Ph[-1]/1e6:.3f} MPa (ΔP = {dP_hot/1e3:.2f} kPa)")
         print(f"  Cold: {self.Pc[-1]/1e6:.3f} MPa → {self.Pc[0]/1e6:.3f} MPa (ΔP = {dP_cold/1e3:.2f} kPa)")
 
-        # Heat transfer
-        Q_total = np.sum(self.Q)
+        # Heat transfer — use inlet/outlet enthalpy states (includes conversion heat)
+        mh = self.streams['hot']['m']
+        Q_total = mh * (self.props_h['h'][0] - self.props_h['h'][-1])
         print("\nHeat Transfer:")
         print(f"  Total heat load: {Q_total:.2f} W")
         print(f"  Theoretical Max Capacity (Global): {self.Q_max_capacity:.2f} W")
-        print(f"  Effectiveness: {Q_total/self.Q_max_capacity*100:.1f} %")
+        print(f"  Effectiveness: {Q_total/max(self.Q_max_capacity,1e-12)*100:.1f} %")
         print(f"  Avg U: {np.mean(self.U):.2f} W/m2K")
 
         # Conversion
@@ -1104,9 +1249,20 @@ class TPMSHeatExchanger:
         # Performance Evaluation Indicators
         if self.perf:
             p = self.perf
-            print("\nPerformance Evaluation:")
-            print(f"  Exergy efficiency η_ex:   {p['eta_ex']*100:.1f}%")
-            print(f"  Entropy generation S_gen:  {p['S_gen_total']*1e3:.3f} mW/K  (T0 = {p['T0']:.2f} K)")
+            print("\nExergy Analysis (Gouy-Stodola, 3-source decomposition):")
+            print(f"  Dead-state T0:             {p['T0']:.2f} K")
+            print(f"  η_ex (HX, thermal):        {p['eta_ex']*100:.1f}%  (always ≤ 100%)")
+            print(f"  He cold exergy consumed:   {p['Ex_He_consumed']:.4f} W")
+            print(f"  H2 total exergy gained:    {p['Ex_H2_total_gain']:.4f} W")
+            print(f"    ↳ H2 chem contribution:  {p['Ex_chem_net']:.4f} W")
+            print(f"  Ex destroyed (HT+dP):      {p['Ex_dest_thermal']:.4f} W")
+            print(f"  Ex destroyed (chem rxn):   {p['Ex_dest_chem_tot']:.4f} W")
+            print(f"  Ex destroyed (grand total):{p['Ex_dest_grand']:.4f} W")
+            print(f"  Balance residual:          {p['Ex_balance_residual']:.4f} W  (≈ 0 if consistent)")
+            print(f"  S_gen total:               {p['S_gen_total']*1e3:.3f} mW/K")
+            print(f"    ↳ Heat transfer ΔT:      {p['S_gen_HT_tot']*1e3:.3f} mW/K")
+            print(f"    ↳ Pressure drop ΔP:      {p['S_gen_dP_tot']*1e3:.3f} mW/K")
+            print(f"    ↳ Ortho-para reaction:   {p['S_gen_chem_tot']*1e3:.3f} mW/K")
             print(f"  j-factor mean (hot/cold):  {p['j_mean_h']:.4f} / {p['j_mean_c']:.4f}")
             print(f"  PEC mean (hot/cold):       {p['PEC_mean_h']:.4f} / {p['PEC_mean_c']:.4f}")
         print("=" * 70)

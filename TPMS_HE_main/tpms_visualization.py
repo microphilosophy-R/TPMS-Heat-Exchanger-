@@ -285,23 +285,23 @@ class TPMSVisualizer:
         mean_U = float(np.mean(he.U))
 
         lines = [
-            r"$\bf{Thermo-Hydraulic\ Summary}$",
+            "--- Thermo-Hydraulic Summary ---",
             "",
-            r"$\it{Temperatures\ (K)}$",
+            "Temperatures (K)",
             f"  Hot:   {Th_in:.2f} \u2192 {Th_out:.2f}  (\u0394T = {dTh:.2f} K)",
             f"  Cold:  {Tc_in:.2f} \u2192 {Tc_out:.2f}  (\u0394T = {dTc:.2f} K)",
             f"  LMTD:  {LMTD:.2f} K",
             "",
-            r"$\it{Pressures}$",
+            "Pressures",
             f"  Hot:   {Ph_in:.3f} \u2192 {Ph_out:.3f} MPa  (\u0394P = {dP_hot:.2f} kPa)",
             f"  Cold:  {Pc_in:.3f} \u2192 {Pc_out:.3f} MPa  (\u0394P = {dP_cold:.2f} kPa)",
             "",
-            r"$\it{Para-H_2\ Fraction}$",
+            "Para-H2 Fraction",
             f"  Actual:  {x_in:.4f} \u2192 {x_out:.4f}",
             f"  Equil.:  {x_eq_in:.4f} \u2192 {x_eq_out:.4f}",
             f"  Conv. eff.: {eff_conv:.1f}%",
             "",
-            r"$\it{Heat\ Transfer}$",
+            "Heat Transfer",
             f"  Q total:       {Q_total:.1f} W",
             f"  Effectiveness: {Q_total / max(he.Q_max_capacity, 1e-12) * 100:.1f}%",
             f"  Mean U:        {mean_U:.1f} W/m\u00b2K",
@@ -321,7 +321,7 @@ class TPMSVisualizer:
             Ex_chem  = perf.get('Ex_chem_net', 0.0)
             lines += [
                 "",
-                r"$\bf{Exergy\ Analysis}$" + f"  (T\u2080={perf['T0']:.0f} K)",
+                f"--- Exergy Analysis  (T0={perf['T0']:.0f} K) ---",
                 f"  \u03b7_ex (HX, thermal): {perf['eta_ex'] * 100:.1f}%",
                 f"  He cold ex consumed: {Ex_He:.4f} W",
                 f"  H2 total ex gained:  {Ex_H2:.4f} W",
@@ -335,7 +335,7 @@ class TPMSVisualizer:
                 f"  \u0394P: {perf.get('S_gen_dP_tot',0.0)*1e3:.3f}"
                 f"  chem: {perf.get('S_gen_chem_tot',0.0)*1e3:.3f} mW/K",
                 "",
-                r"$\bf{Transfer\ Performance}$",
+                "--- Transfer Performance ---",
                 f"  j_mean  h/c:   {perf['j_mean_h']:.4f} / {perf['j_mean_c']:.4f}",
                 f"  PEC_mean h/c:  {perf['PEC_mean_h']:.4f} / {perf['PEC_mean_c']:.4f}",
             ]
@@ -541,8 +541,8 @@ class TPMSVisualizer:
         ex_bal  = perf.get('Ex_balance_residual', Ex_He - Ex_H2 - dest_grand)
 
         summary_lines = [
-            r"$\bf{Exergy\ Analysis\ (Gouy-Stodola,\ 3\ sources)}$",
-            f"  Dead-state T\u2080 = {perf['T0']:.1f} K  (ambient)",
+            "--- Exergy Analysis (Gouy-Stodola, 3 sources) ---",
+            f"  Dead-state T0 = {perf['T0']:.1f} K  (ambient)",
             f"  He cold exergy consumed  = {Ex_He:.4f} W",
             f"  H2 total exergy gained   = {Ex_H2:.4f} W",
             f"    \u21b3 H2 chem. contribution = {Ex_chem:.4f} W",
@@ -557,7 +557,7 @@ class TPMSVisualizer:
             f"  | \u0394P: {perf.get('S_gen_dP_tot', 0.0)*1e3:.3f}"
             f"  | chem: {perf.get('S_gen_chem_tot', 0.0)*1e3:.3f} mW/K",
             "",
-            r"$\bf{Thermo-Hydraulic\ Performance}$",
+            "--- Thermo-Hydraulic Performance ---",
             f"  Effectiveness       = {effectiveness:.1f}%",
             f"  j_mean  hot / cold  = {perf['j_mean_h']:.4f} / {perf['j_mean_c']:.4f}",
             f"  PEC_mean hot / cold = {perf['PEC_mean_h']:.4f} / {perf['PEC_mean_c']:.4f}",

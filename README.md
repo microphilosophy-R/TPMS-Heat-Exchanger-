@@ -21,6 +21,7 @@ This repository now merges the original two stages into one solver path while ke
 - Fixed runtime stability issues found during UI-driven runs:
   - Windows console encoding-safe export logs (`[OK] ...` messages)
   - mathtext parse issue in visualization summary (`Delta P_h` text rendering)
+  - matplotlib `ParseException` in text annotation panels (see below)
 - Added TPMS Geometry Estimator panel (Step 1 – Geometry):
   - Surface area density (SAD) estimation via Marching Cubes (scikit-image, optional)
     for Gyroid, Diamond, Primitive; empirical formulas for Neovius, FRD, FKS
@@ -191,6 +192,47 @@ Implementation details:
 - `xh` is initialized as a flat inlet profile (no artificial conversion ramp).
 - In bare hot-channel cases, solver enforces constant `xh` profile each iteration.
 
+## Cross-Temperature Phenomenon (Tc_out > Th_in)
+
+When the hot channel is packed with an ortho-para conversion catalyst, the
+H2 stream contains an **internal distributed heat source** — the exothermic
+ortho→para conversion (~703 kJ/kg at cryogenic temperatures).  This decouples
+the system from standard single-phase HX thermodynamics:
+
+```
+Standard HX (no internal source):    Tc_out ≤ Th_in  always
+Packed-bed H2 HX (conversion ON):    Tc_out > Th_in  is physically valid
+```
+
+**Physical mechanism:**  Near the cold end of the exchanger the H2 has already
+been cooled significantly and its ortho-para conversion accelerates (higher
+equilibrium para-fraction at lower T).  The conversion heat released into the H2
+stream can locally exceed the sensible cooling rate, so the H2 temperature
+*rises* in that region.  The cold He stream continues to absorb heat from what
+is now a locally warmer H2, driving Tc_out above Th_in (the H2 *inlet*
+temperature).
+
+**Consequence for effectiveness:**  The standard NTU-ε min-capacity-rate formula
+assumes no internal sources and would yield ε > 100% if applied naively.  Two
+corrections are applied in this solver:
+
+1. **Q_actual from enthalpy states** — `Q = mh × [h(Th_in, xh_in) − h(Th_out, xh_out)]`
+   (inlet/outlet enthalpy difference, not `Σ UA·ΔT`).  This correctly accounts
+   for conversion heat deposited into the stream.
+
+2. **Q_max from full conversion to equilibrium** — when conversion is active,
+   `Q_max = mh × [h(Th_in, xh_in) − h(Tc_in, x_eq(Tc_in))]`.  This is the
+   maximum enthalpy the H2 could release: sensible cooling *plus* complete
+   ortho→para conversion at the cold-end temperature.  Because this bound always
+   exceeds Q_actual, effectiveness is guaranteed ≤ 100%.
+
+   In bare mode (no conversion), the standard rule applies:
+   `Q_max = min(Q_max_hot, Q_max_cold)`.
+
+**Code location:** `_initialize_state` in
+`tpms_thermo_hydraulic_calculator.py` (lines ~475–504); `_print_results` and
+`tpms_visualization.py` use enthalpy-based Q throughout.
+
 ## New Canonical Config Schema
 
 ```python
@@ -276,7 +318,47 @@ Troubleshooting:
 - if `streamlit` command is not found, always use:
   - `python -m streamlit run app.py`
 - if autosave causes unexpected form values, use `Reload Autosave` or `Reset Defaults`
-- if you previously saw `ParseException` during plotting, update to the latest code (this is fixed in current version)
+- if you see `ParseException` during plotting, see the section below
+
+### matplotlib ParseException in text annotation panels
+
+**Symptom:**
+
+```
+ParseException: Expected end of text, found '$' (at char 0), (line:1, col:1)
+```
+
+Matplotlib prints each character of the failing string to the terminal before
+raising the exception, so you will see output like:
+
+```
+T h e r m o − H y d r a u l i c   P e r f o r m a n c e
+ParseException: Expected end of text, found '$'...
+```
+
+**Root cause:**
+
+Matplotlib's mathtext parser is triggered whenever a text string contains `$`
+delimiters.  Inside `$...$`, a hyphen `-` is treated as a **minus operator**,
+so strings like `$\bf{Thermo-Hydraulic\ Summary}$` cause a parse error because
+`Thermo` and `Hydraulic` are parsed as variables with `-` (subtraction) between
+them.  Additionally, mixed strings of the form `r"$\bf{...}$" + f"...plain..."`
+confuse the parser in some matplotlib versions.
+
+**Fix applied (March 2026):**
+
+All `$\bf{...}$` and `$\it{...}$` mathtext markup was removed from the
+multi-line text annotation strings in `tpms_visualization.py`.  Headers now use
+plain `"--- Header ---"` style text; section labels use plain strings.  Axis
+titles and labels that use `$...$` only for single symbols (e.g. `$\xi$`,
+`$\Delta P$`) are unaffected — those contain no hyphens and parse correctly.
+
+**Rule going forward:**
+
+Never use `$\bf{text-with-hyphens}$` or `$\it{text-with-hyphens}$` in
+`ax.text()` / `ax.annotate()` calls.  Use plain Unicode text for annotation
+boxes; reserve `$...$` for axis labels and titles where only math symbols
+(Greek letters, fractions, superscripts) are needed.
 
 ## Mode Combination Examples
 

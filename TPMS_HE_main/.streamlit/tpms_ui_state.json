@@ -60,8 +60,8 @@
     "Th_in": 78.0,
     "fluid_cold": "helium",
     "fluid_hot": "hydrogen mixture",
-    "mc": 0.06,
-    "mh": 0.02,
+    "mc": 0.6,
+    "mh": 0.2,
     "xh_in": 0.452
   },
   "output": {

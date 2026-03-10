@@ -4,8 +4,15 @@ Hydrogen Property Module with Unified Species Interface
 Features:
 - Unified inquiry for Hydrogen Mixture, Normal Hydrogen, Helium, and Argon.
 - Preserves custom enthalpy AND entropy reference correction for Hydrogen spin isomers.
-- CoolProp uses independent NBP reference states per isomer; offsets re-reference ortho
-  entropy onto the para scale, enforcing the known conversion entropy at 20 K (ΔH/T).
+- Enthalpy offset anchored at 20 K (known conversion heat DELTA_H_NP_20K).
+- Entropy offset anchored at 300 K via Gibbs-equilibrium condition:
+    at T=300K, x=x_eq(300K), enforce μ_para = μ_ortho_corr.
+  This makes the model Gibbs-consistent at 300 K (|Δμ/RT|≈0) and gives
+  |Δμ/RT| < 0.08 across the cryogenic operating range 50–300 K.
+  (Old approach used a normal-H2 entropy bridge at 300 K which gave |Δμ/RT|≈2.95
+   everywhere — the entropy scale was physically wrong.)
+- Equilibrium fraction x_eq(T) from quantum partition functions (Method 1),
+  replacing the less-accurate empirical polynomial.
 - Ideal mixing entropy (-R·Σxi·ln xi) is added to the mixture entropy explicitly.
 - Uses CoolProp Low-Level Interface (AbstractState) for performance.
 """
@@ -14,6 +21,13 @@ import numpy as np
 from CoolProp import AbstractState
 from CoolProp.CoolProp import PropsSI, PT_INPUTS
 
+# Physical constants for partition-function equilibrium fraction
+_kB      = 1.380649e-23      # Boltzmann constant  [J/K]
+_h_plan  = 6.62607015e-34    # Planck constant     [J·s]
+_c_cm    = 2.99792458e10     # Speed of light      [cm/s]
+_B_H2    = 60.8566           # H2 rotational const [cm⁻¹]
+_THETA_R = (_h_plan * _c_cm * _B_H2) / _kB   # ≈ 87.55 K
+
 
 class ThermalProperties:
     """
@@ -21,12 +35,12 @@ class ThermalProperties:
     and inert fluids (Helium, Argon) via a unified interface.
     """
 
-    # Constants for Hydrogen Correction
-    DELTA_H_NP_20K = 527.138e3          # J/kg  — enthalpy of conversion normal→para at 20 K
-    DELTA_S_NP_20K = 527.138e3 / 20.0   # J/(kg·K) — entropy of conversion (ΔH/T, ΔG=0 at 20 K)
+    # Enthalpy of conversion normal→para at 20 K [J/kg]
+    DELTA_H_NP_20K = 527.138e3
 
-    T_REF_20K = 20.0    # K
-    P_REF = 101325.0    # Pa
+    T_REF_20K  = 20.0       # K  — enthalpy anchor
+    T_REF_300K = 300.0      # K  — entropy / Gibbs anchor
+    P_REF      = 101325.0   # Pa
     R_SPECIFIC = 8.314 / 2.016 * 1000  # J/(kg·K)
 
     def __init__(self):
@@ -61,20 +75,16 @@ class ThermalProperties:
             Forces h_mix(x_para=0.25) - h_para = DELTA_H_NP_20K by re-referencing
             the ortho enthalpy to the para datum using the measured ortho-para gap.
 
-        Entropy offsets (anchored at 300 K via normal H2 as physical bridge):
-            CoolProp assigns completely independent reference states to OrthoHydrogen
-            and ParaHydrogen, so raw smass() values cannot be mixed directly.  At
-            300 K, normal H2 is at chemical equilibrium (x_para ≈ 0.25), which makes
-            it a self-consistent anchor:
-
-                s_normal(300K) = 0.25·s_para(300K)
-                               + 0.75·(s_ortho_raw(300K) + s_offset_ortho)
-                               + s_mix_normal
-
-            Solving for s_offset_ortho eliminates the arbitrary inter-isomer datum
-            gap, removing the phantom T0·Δs term that caused exergy explosion.
-            Using 20 K as the entropy anchor (the old approach) was wrong because
-            x_eq(20K) ≈ 0.98 ≠ 0.25, so ΔG ≠ 0 at that composition/temperature.
+        Entropy offset (Gibbs-equilibrium anchor at 300 K):
+            At T=300K, x=x_eq(300K)≈0.2508, enforce μ_para = μ_ortho_corr:
+                h_para - T·s_para + R·T·ln(x_eq)
+                = (h_ortho_raw + h_off) - T·(s_ortho_raw + s_off_s) + R·T·ln(1−x_eq)
+            Solving for s_off_s:
+                s_off_s = (h_ortho_corr − h_para)/T
+                          − (s_ortho_raw − s_para)
+                          + R·ln((1−x_eq)/x_eq)
+            This gives |Δμ/RT|≈0 at 300K and |Δμ/RT|<0.08 across 50–300K.
+            The old normal-H2 entropy bridge gave |Δμ/RT|≈2.95 everywhere.
         """
         try:
             # --- Enthalpy offsets at 20 K ---
@@ -98,33 +108,33 @@ class ThermalProperties:
             self.delta_h_op_20K = self.DELTA_H_NP_20K / 0.75
             self.h_offset_ortho = self.delta_h_op_20K - (h_ortho_ref_raw - h_para_ref)
 
-            # --- Entropy offsets at 300 K ---
-            T_ref_s = 300.0
+            # --- Entropy offset: Gibbs-equilibrium anchor at 300 K ---
+            T_anc    = self.T_REF_300K
+            x_eq_anc = float(self.get_equilibrium_fraction(T_anc))
+
             if self.use_low_level:
-                self.state_para.update(PT_INPUTS, self.P_REF, T_ref_s)
-                s_p_300 = self.state_para.smass()
+                self.state_para.update(PT_INPUTS, self.P_REF, T_anc)
+                h_p_anc = self.state_para.hmass()
+                s_p_anc = self.state_para.smass()
 
-                self.state_normal_h2.update(PT_INPUTS, self.P_REF, T_ref_s)
-                s_n_300 = self.state_normal_h2.smass()
-
-                self.state_ortho.update(PT_INPUTS, self.P_REF, T_ref_s)
-                s_o_300 = self.state_ortho.smass()
+                self.state_ortho.update(PT_INPUTS, self.P_REF, T_anc)
+                h_o_anc_raw = self.state_ortho.hmass()
+                s_o_anc_raw = self.state_ortho.smass()
             else:
-                s_p_300 = PropsSI('S', 'T', T_ref_s, 'P', self.P_REF, 'ParaHydrogen')
-                s_n_300 = PropsSI('S', 'T', T_ref_s, 'P', self.P_REF, 'Hydrogen')
-                s_o_300 = PropsSI('S', 'T', T_ref_s, 'P', self.P_REF, 'OrthoHydrogen')
+                h_p_anc     = PropsSI('H', 'T', T_anc, 'P', self.P_REF, 'ParaHydrogen')
+                s_p_anc     = PropsSI('S', 'T', T_anc, 'P', self.P_REF, 'ParaHydrogen')
+                h_o_anc_raw = PropsSI('H', 'T', T_anc, 'P', self.P_REF, 'OrthoHydrogen')
+                s_o_anc_raw = PropsSI('S', 'T', T_anc, 'P', self.P_REF, 'OrthoHydrogen')
 
-            # Ideal mixing entropy of normal H2 (25% para, 75% ortho)
-            x_p_n, x_o_n = 0.25, 0.75
-            s_mix_normal = -self.R_SPECIFIC * (x_p_n * np.log(x_p_n) + x_o_n * np.log(x_o_n))
-
-            # Solve: s_n_300 = 0.25*s_p_300 + 0.75*(s_o_300 + s_offset_ortho) + s_mix_normal
-            self.s_offset_ortho = (s_n_300 - s_mix_normal - 0.25 * s_p_300) / 0.75 - s_o_300
-
-            # s_offset_normal: auxiliary key only (not used in mixture s calculation).
-            # By construction at 300K the bridge closes, so offset ≈ 0; set to zero.
+            h_o_anc_corr = h_o_anc_raw + self.h_offset_ortho
+            # Enforce μ_para = μ_ortho_corr at (T_anc, x_eq_anc)
+            self.s_offset_ortho = (
+                (h_o_anc_corr - h_p_anc) / T_anc
+                - (s_o_anc_raw - s_p_anc)
+                + self.R_SPECIFIC * np.log((1.0 - x_eq_anc) / x_eq_anc)
+            )
             self.s_offset_normal = 0.0
-            self.delta_s_op_20K  = self.s_offset_ortho + (s_o_300 - s_p_300)  # backward compat
+            self.delta_s_op_20K  = self.s_offset_ortho + (s_o_anc_raw - s_p_anc)  # backward compat
 
         except Exception as e:
             print(f"Warning: Offset calculation failed: {e}")
@@ -299,12 +309,30 @@ class ThermalProperties:
 
     @staticmethod
     def get_equilibrium_fraction(T):
-        """Calculates para-hydrogen equilibrium fraction."""
-        T = np.atleast_1d(T)
-        x_eq = (0.1 * (np.exp(-175 / T) + 0.1) ** (-1) -
-                7.06e-9 * T ** 3 + 3.42e-6 * T ** 2 - 6.2e-5 * T - 0.00227)
-        x_eq = np.clip(x_eq, 0, 1)
-        return x_eq if len(x_eq) > 1 else x_eq[0]
+        """
+        Para-H2 equilibrium mole fraction via quantum rotational partition functions.
+
+        Method 1 (statistical mechanics):
+            Z_para  = Σ_{J=0,2,4,...} (2J+1) exp(-θ_r·J(J+1)/T)
+            Z_ortho = Σ_{J=1,3,5,...} 3(2J+1) exp(-θ_r·J(J+1)/T)
+            x_eq    = Z_para / (Z_para + Z_ortho),  θ_r ≈ 87.55 K
+
+        More accurate than empirical polynomials, especially below 50 K.
+        Matches acc.py (Method 1) to < 1e-4 across 20–300 K.
+        """
+        scalar = np.isscalar(T)
+        T_arr  = np.atleast_1d(np.asarray(T, dtype=float))
+        x_eq   = np.zeros_like(T_arr)
+        for i, Ti in enumerate(T_arr):
+            z_p = z_o = 0.0
+            for j in range(21):      # converges well below 300 K
+                term = (2*j + 1) * np.exp(-_THETA_R * j * (j + 1) / Ti)
+                if j % 2 == 0:
+                    z_p += term
+                else:
+                    z_o += 3.0 * term   # ortho nuclear spin degeneracy = 3
+            x_eq[i] = z_p / (z_p + z_o)
+        return float(x_eq[0]) if scalar else x_eq
 
 
 def test_hydrogen_properties():

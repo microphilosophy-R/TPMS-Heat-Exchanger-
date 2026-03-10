@@ -249,6 +249,8 @@ class TPMSHeatExchanger:
         self.A_elem        = self.A_elem_h
         self.L_elem        = L_h / self.N    # hot-channel element length
         self.L_elem_c      = L_c / self.N    # cold-channel element length
+        self.W             = W_h             # hot-channel cross-section width  [m]
+        self.H             = H_h             # hot-channel cross-section height [m]
         self.wall_thickness   = tw_h     # hot-side TPMS skeleton thickness (legacy name)
         self.wall_thickness_c = tw_c     # cold-side TPMS skeleton thickness
         self.plate_thickness  = float(self.config['geometry'].get(

@@ -1490,14 +1490,16 @@ def render_run_result():
         if str(p):
             st.write(f"- `{p}` {'(found)' if p.exists() else '(missing)'}")
 
-    if os.path.exists(out["performance_plot"]):
-        st.image(out["performance_plot"], caption="Performance Profile")
-    if os.path.exists(out.get("resistance_pie", "")):
-        st.image(out["resistance_pie"], caption="Thermal Resistance Breakdown")
-    if os.path.exists(out.get("performance_eval_plot", "")):
-        st.image(out["performance_eval_plot"], caption="Performance Evaluation — Exergy & PEC")
-    if os.path.exists(out["convergence_plot"]):
-        st.image(out["convergence_plot"], caption="Convergence Diagnostics")
+    for _img_key, _caption in [
+        ("performance_plot",     "Performance Profile"),
+        ("resistance_pie",       "Thermal Resistance Breakdown"),
+        ("performance_eval_plot","Performance Evaluation — Exergy & PEC"),
+        ("convergence_plot",     "Convergence Diagnostics"),
+    ]:
+        _p = out.get(_img_key, "")
+        if _p and os.path.exists(_p):
+            with open(_p, "rb") as _f:
+                st.image(_f.read(), caption=_caption)
     if os.path.exists(out["results_csv"]):
         st.subheader("Results Preview")
         try:

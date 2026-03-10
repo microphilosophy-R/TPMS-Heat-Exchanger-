@@ -456,6 +456,7 @@ class TPMSHeatExchanger:
 
         self.Q = np.zeros(N_elems)
         self.U = np.zeros(N_elems)
+        self.dx_dt = np.zeros(N_elems)  # kinetic para-fraction rate [1/s], signed
 
         # Thermal resistance arrays per element [K/W] — filled by _compute_energy_balance()
         self.R_hot  = np.zeros(N_elems)   # total hot-side resistance
@@ -811,14 +812,21 @@ class TPMSHeatExchanger:
                 C_H2 = rho / 0.002016
                 kw = 34.76 - 220.9 * (T / Tc_H2) - 20.65 * (P / Pc_H2)
 
-                term = (1 - x_eq) / (1 - x + 1e-9)
-                rate = (kw / C_H2) * np.log(term) if (x < x_eq and term > 0) else 0
-                rate = max(0, min(rate, 10.0))
+                # Guard against blow-up at pure limits (x→0 or x→1)
+                x_s    = np.clip(x,    1e-9, 1.0 - 1e-9)
+                x_eq_s = np.clip(x_eq, 1e-9, 1.0 - 1e-9)
+                term   = (1.0 - x_eq_s) / (1.0 - x_s)
+                # Reversible: rate > 0 (forward, ortho→para) when x < x_eq
+                #             rate < 0 (backward, para→ortho) when x > x_eq
+                # kw < 0 at cryogenic T → sign convention consistent with thermodynamics
+                rate = (kw / C_H2) * np.log(term)   # [1/s], signed
+                rate = np.clip(rate, -10.0, 10.0)    # symmetric magnitude cap only
 
                 u = mh / (rho * Ac)
                 # Calculate downstream x based on upstream x (xh[i])
                 # Note: using self.xh[i] (current best guess) as base is standard for spatial marching
-                xh_calc[i + 1] = np.clip(self.xh[i] + rate * (self.L_elem / u), 0, 1.0)
+                xh_calc[i + 1] = np.clip(self.xh[i] + rate * (self.L_elem / u), 0.0, 1.0)
+                self.dx_dt[i]  = rate   # kinetic para-fraction rate [1/s], signed
             except:
                 xh_calc[i + 1] = self.xh[i]
 
@@ -1038,8 +1046,13 @@ class TPMSHeatExchanger:
         Ex_dest_chem     = np.zeros(N)   # Source 3: ortho-para conversion   [W]
         Ex_dest_dP       = np.zeros(N)   # Source 2: pressure drop           [W]
         S_gen_HT         = np.zeros(N)   # [W/K]
-        S_gen_dP         = np.zeros(N)   # [W/K]  — NEW: pressure-drop Sgen
+        S_gen_dP         = np.zeros(N)   # [W/K]
         S_gen_chem       = np.zeros(N)   # [W/K]
+
+        # Hot-channel void cross-section area [m²] for Eq. 12 integration
+        eps_h = self.config['channels']['hot'].get(
+            'porosity', self.config['geometry'].get('porosity', 0.3))
+        Ac_h = self.W * self.H * eps_h
 
         for i in range(N):
             # Legacy per-element exergy trackers (for backward-compat output)
@@ -1066,24 +1079,30 @@ class TPMSHeatExchanger:
             S_gen_dP[i]  = S_gen_dP_h_i + S_gen_dP_c_i
             Ex_dest_dP[i] = T0 * S_gen_dP[i]
 
-            # Source 3 — Ortho-para chemical conversion irreversibility
-            # Reaction affinity: A = -ΔG_rxn = R·T·ln[x_eq·(1-x) / (x·(1-x_eq))]
-            # This is exact: A = 0 at equilibrium (x = x_eq), A > 0 for x < x_eq.
-            # Ṡ_gen,chem = ṁ·Δx·A / T  [W/K]
-            dx_i = self.xh[i + 1] - self.xh[i]
-            if dx_i > 1e-9:
-                T_e = 0.5 * (self.Th[i] + self.Th[i + 1])
-                x_e = 0.5 * (self.xh[i] + self.xh[i + 1])
+            # Source 3 — Ortho-para chemical conversion irreversibility (paper Eq. 12, 15)
+            # Reversible: forward (x<x_eq, dx_dt>0, A>0) and backward (x>x_eq, dx_dt<0, A<0)
+            # Mass-specific form integrated over element:
+            #   S_gen_i = ṁ · dx_kinetic · A_spec / T   [W/K]
+            # where dx_kinetic = dx_dt[i] · L_elem / u_h  is the kinetic Δx_p per element
+            #       A_spec     = R_spec · T · ln[x_eq·(1−x)/((1−x_eq)·x)]  [J/kg]
+            # dx_dt · A_spec ≥ 0 for any spontaneous direction → S_gen ≥ 0
+            if abs(self.dx_dt[i]) > 1e-15 and 'hydrogen' in self.streams['hot']['species']:
+                T_e   = 0.5 * (self.Th[i] + self.Th[i + 1])
+                x_e   = 0.5 * (self.xh[i] + self.xh[i + 1])
+                rho_h = 0.5 * (self.props_h['rho'][i] + self.props_h['rho'][i + 1])
+                u_h   = mh / max(rho_h * Ac_h, 1e-12)           # [m/s]
+                dx_kinetic = self.dx_dt[i] * self.L_elem / u_h  # kinetic Δx_p, signed
                 try:
                     x_eq_e = float(self.h2_props.get_equilibrium_fraction(T_e))
-                    if 0.0 < x_e < 1.0 and 0.0 < x_eq_e < 1.0:
-                        # ΔG_rxn [J/kg]: < 0 when x < x_eq (spontaneous ortho→para)
-                        dg_rxn = self.h2_props.R_SPECIFIC * T_e * np.log(
-                            (x_e * (1.0 - x_eq_e)) / (x_eq_e * (1.0 - x_e))
-                        )
-                        S_gen_c = -mh * dx_i * dg_rxn / max(T_e, 1.0)
-                        S_gen_chem[i] = S_gen_c
-                        Ex_dest_chem[i] = T0 * max(S_gen_c, 0.0)
+                    x_e_s  = np.clip(x_e,    1e-9, 1.0 - 1e-9)
+                    x_eq_s = np.clip(x_eq_e, 1e-9, 1.0 - 1e-9)
+                    A_spec = self.h2_props.R_SPECIFIC * T_e * np.log(
+                        (x_eq_s * (1.0 - x_e_s)) / (x_e_s * (1.0 - x_eq_s))
+                    )   # [J/kg]; same sign as dx_dt for spontaneous process
+                    S_gen_c = mh * dx_kinetic * A_spec / max(T_e, 1.0)   # [W/K]
+                    if S_gen_c >= 0.0:       # floating-point safety net
+                        S_gen_chem[i]   = S_gen_c
+                        Ex_dest_chem[i] = T0 * S_gen_c
                 except Exception:
                     pass
 
@@ -1258,7 +1277,6 @@ class TPMSHeatExchanger:
             print(f"  η_ex (HX, thermal):        {p['eta_ex']*100:.1f}%  (always ≤ 100%)")
             print(f"  He cold exergy consumed:   {p['Ex_He_consumed']:.4f} W")
             print(f"  H2 total exergy gained:    {p['Ex_H2_total_gain']:.4f} W")
-            print(f"    ↳ H2 chem contribution:  {p['Ex_chem_net']:.4f} W")
             print(f"  Ex destroyed (HT+dP):      {p['Ex_dest_thermal']:.4f} W")
             print(f"  Ex destroyed (chem rxn):   {p['Ex_dest_chem_tot']:.4f} W")
             print(f"  Ex destroyed (grand total):{p['Ex_dest_grand']:.4f} W")

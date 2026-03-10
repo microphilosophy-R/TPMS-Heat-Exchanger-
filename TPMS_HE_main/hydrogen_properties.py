@@ -51,17 +51,33 @@ class ThermalProperties:
             print(f"Warning: Could not create AbstractState objects: {e}")
             self.use_low_level = False
 
-        # Calculate offsets for reference corrections
-        self._calculate_enthalpy_offset()
-        self._calculate_entropy_offset()
+        # Calculate enthalpy + entropy datum offsets
+        self._calculate_offsets()
 
-    def _calculate_enthalpy_offset(self):
-        """Calculates the H2 enthalpy offset to match physical conversion heat at 20 K.
+    def _calculate_offsets(self):
+        """Calculates H2 enthalpy and entropy datum offsets for ortho/para isomers.
 
-        Forces h_mix(x_para=0.25) - h_para = DELTA_H_NP_20K by re-referencing ortho
-        enthalpy to the para scale using the actual ortho-para enthalpy difference.
+        Enthalpy offsets (anchored at 20 K):
+            Forces h_mix(x_para=0.25) - h_para = DELTA_H_NP_20K by re-referencing
+            the ortho enthalpy to the para datum using the measured ortho-para gap.
+
+        Entropy offsets (anchored at 300 K via normal H2 as physical bridge):
+            CoolProp assigns completely independent reference states to OrthoHydrogen
+            and ParaHydrogen, so raw smass() values cannot be mixed directly.  At
+            300 K, normal H2 is at chemical equilibrium (x_para ≈ 0.25), which makes
+            it a self-consistent anchor:
+
+                s_normal(300K) = 0.25·s_para(300K)
+                               + 0.75·(s_ortho_raw(300K) + s_offset_ortho)
+                               + s_mix_normal
+
+            Solving for s_offset_ortho eliminates the arbitrary inter-isomer datum
+            gap, removing the phantom T0·Δs term that caused exergy explosion.
+            Using 20 K as the entropy anchor (the old approach) was wrong because
+            x_eq(20K) ≈ 0.98 ≠ 0.25, so ΔG ≠ 0 at that composition/temperature.
         """
         try:
+            # --- Enthalpy offsets at 20 K ---
             if self.use_low_level:
                 self.state_para.update(PT_INPUTS, self.P_REF, self.T_REF_20K)
                 h_para_ref = self.state_para.hmass()
@@ -72,69 +88,51 @@ class ThermalProperties:
                 self.state_ortho.update(PT_INPUTS, self.P_REF, self.T_REF_20K)
                 h_ortho_ref_raw = self.state_ortho.hmass()
             else:
-                h_para_ref      = PropsSI('H', 'T', self.T_REF_20K, 'P', self.P_REF, 'ParaHydrogen')
+                h_para_ref       = PropsSI('H', 'T', self.T_REF_20K, 'P', self.P_REF, 'ParaHydrogen')
                 h_normal_ref_raw = PropsSI('H', 'T', self.T_REF_20K, 'P', self.P_REF, 'Hydrogen')
                 h_ortho_ref_raw  = PropsSI('H', 'T', self.T_REF_20K, 'P', self.P_REF, 'OrthoHydrogen')
 
             delta_h_current = h_normal_ref_raw - h_para_ref
             self.h_offset_normal = self.DELTA_H_NP_20K - delta_h_current
 
-            # Ortho offset: use actual h_ortho directly (not the normal-H2 EOS proxy)
             self.delta_h_op_20K = self.DELTA_H_NP_20K / 0.75
             self.h_offset_ortho = self.delta_h_op_20K - (h_ortho_ref_raw - h_para_ref)
 
-        except Exception as e:
-            print(f"Warning: Enthalpy offset calculation failed: {e}")
-            self.h_offset_normal = 0
-            self.h_offset_ortho = 0
-
-    def _calculate_entropy_offset(self):
-        """Calculates the H2 entropy offset to match physical conversion entropy at 20 K.
-
-        CoolProp uses independent reference states per isomer, so raw smass() values
-        cannot be directly mixed. This method re-references ortho entropy to the para
-        scale by enforcing the known conversion entropy DELTA_S_NP_20K = ΔH/T.
-
-        The mixture entropy is computed as:
-            s_mix = x_p * s_para_corr + x_o * s_ortho_corr + s_ideal_mix
-        where s_ideal_mix = -R * (x_p*ln(x_p) + x_o*ln(x_o)) is added explicitly.
-
-        Derivation of s_offset_ortho:
-            s_mix(x=0.25) - s_para = DELTA_S_NP_20K
-            0.75*(s_ortho_corr - s_para) + s_mix_ref = DELTA_S_NP_20K
-            s_ortho_corr - s_para = (DELTA_S_NP_20K - s_mix_ref) / 0.75
-            s_offset_ortho = (DELTA_S_NP_20K - s_mix_ref)/0.75 - (s_ortho_raw - s_para_ref)
-        """
-        try:
+            # --- Entropy offsets at 300 K ---
+            T_ref_s = 300.0
             if self.use_low_level:
-                self.state_para.update(PT_INPUTS, self.P_REF, self.T_REF_20K)
-                s_para_ref = self.state_para.smass()
+                self.state_para.update(PT_INPUTS, self.P_REF, T_ref_s)
+                s_p_300 = self.state_para.smass()
 
-                self.state_normal_h2.update(PT_INPUTS, self.P_REF, self.T_REF_20K)
-                s_normal_ref_raw = self.state_normal_h2.smass()
+                self.state_normal_h2.update(PT_INPUTS, self.P_REF, T_ref_s)
+                s_n_300 = self.state_normal_h2.smass()
 
-                self.state_ortho.update(PT_INPUTS, self.P_REF, self.T_REF_20K)
-                s_ortho_ref_raw = self.state_ortho.smass()
+                self.state_ortho.update(PT_INPUTS, self.P_REF, T_ref_s)
+                s_o_300 = self.state_ortho.smass()
             else:
-                s_para_ref       = PropsSI('S', 'T', self.T_REF_20K, 'P', self.P_REF, 'ParaHydrogen')
-                s_normal_ref_raw = PropsSI('S', 'T', self.T_REF_20K, 'P', self.P_REF, 'Hydrogen')
-                s_ortho_ref_raw  = PropsSI('S', 'T', self.T_REF_20K, 'P', self.P_REF, 'OrthoHydrogen')
+                s_p_300 = PropsSI('S', 'T', T_ref_s, 'P', self.P_REF, 'ParaHydrogen')
+                s_n_300 = PropsSI('S', 'T', T_ref_s, 'P', self.P_REF, 'Hydrogen')
+                s_o_300 = PropsSI('S', 'T', T_ref_s, 'P', self.P_REF, 'OrthoHydrogen')
 
-            # s_offset_normal: forces s_normal_corr = s_para + DELTA_S_NP_20K (auxiliary key)
-            delta_s_current = s_normal_ref_raw - s_para_ref
-            self.s_offset_normal = self.DELTA_S_NP_20K - delta_s_current
+            # Ideal mixing entropy of normal H2 (25% para, 75% ortho)
+            x_p_n, x_o_n = 0.25, 0.75
+            s_mix_normal = -self.R_SPECIFIC * (x_p_n * np.log(x_p_n) + x_o_n * np.log(x_o_n))
 
-            # Ideal mixing entropy for normal H2 (x_para=0.25, x_ortho=0.75)
-            s_mix_normal = -self.R_SPECIFIC * (0.25 * np.log(0.25) + 0.75 * np.log(0.75))
+            # Solve: s_n_300 = 0.25*s_p_300 + 0.75*(s_o_300 + s_offset_ortho) + s_mix_normal
+            self.s_offset_ortho = (s_n_300 - s_mix_normal - 0.25 * s_p_300) / 0.75 - s_o_300
 
-            # s_offset_ortho: re-references ortho so mixture rule + mixing entropy gives target
-            self.delta_s_op_20K = (self.DELTA_S_NP_20K - s_mix_normal) / 0.75
-            self.s_offset_ortho = self.delta_s_op_20K - (s_ortho_ref_raw - s_para_ref)
+            # s_offset_normal: auxiliary key only (not used in mixture s calculation).
+            # By construction at 300K the bridge closes, so offset ≈ 0; set to zero.
+            self.s_offset_normal = 0.0
+            self.delta_s_op_20K  = self.s_offset_ortho + (s_o_300 - s_p_300)  # backward compat
 
         except Exception as e:
-            print(f"Warning: Entropy offset calculation failed: {e}")
+            print(f"Warning: Offset calculation failed: {e}")
+            self.h_offset_normal = 0.0
+            self.h_offset_ortho  = 0.0
             self.s_offset_normal = 0.0
             self.s_offset_ortho  = 0.0
+            self.delta_h_op_20K  = 0.0
             self.delta_s_op_20K  = 0.0
 
     def get_properties(self, T, P, species="hydrogen mixture", x_para=None):
@@ -233,11 +231,10 @@ class ThermalProperties:
                 x_p = x_para[i]
                 x_o = 1.0 - x_p
 
-                # Ideal mixing entropy (non-zero only for two-component mixture)
-                if x_p > 0.0 and x_o > 0.0:
-                    s_mix = -self.R_SPECIFIC * (x_p * np.log(x_p) + x_o * np.log(x_o))
-                else:
-                    s_mix = 0.0
+                # Ideal mixing entropy — clamp to avoid log(0) at pure para or ortho
+                xp_safe = max(x_p, 1e-12)
+                xo_safe = max(x_o, 1e-12)
+                s_mix = -self.R_SPECIFIC * (xp_safe * np.log(xp_safe) + xo_safe * np.log(xo_safe))
 
                 props['h'][i]  = x_p * h_para_corr + x_o * h_ortho_corr
                 props['s'][i]  = x_p * s_para_corr + x_o * s_ortho_corr + s_mix

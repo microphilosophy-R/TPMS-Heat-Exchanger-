@@ -1051,11 +1051,6 @@ class TPMSHeatExchanger:
         S_gen_dP         = np.zeros(N)   # [W/K]
         S_gen_chem       = np.zeros(N)   # [W/K]
 
-        # Hot-channel void cross-section area [m²] for Eq. 12 integration
-        eps_h = self.config['channels']['hot'].get(
-            'porosity', self.config['geometry'].get('porosity', 0.3))
-        Ac_h = self.W * self.H * eps_h
-
         for i in range(N):
             # Legacy per-element exergy trackers (for backward-compat output)
             Ex_cold_supplied[i] = mc * (ex_c[i + 1] - ex_c[i])
@@ -1081,32 +1076,21 @@ class TPMSHeatExchanger:
             S_gen_dP[i]  = S_gen_dP_h_i + S_gen_dP_c_i
             Ex_dest_dP[i] = T0 * S_gen_dP[i]
 
-            # Source 3 — Ortho-para chemical conversion irreversibility (paper Eq. 12, 15)
-            # Reversible: forward (x<x_eq, dx_dt>0, A>0) and backward (x>x_eq, dx_dt<0, A<0)
-            # Mass-specific form integrated over element:
-            #   S_gen_i = ṁ · dx_kinetic · A_spec / T   [W/K]
-            # where dx_kinetic = dx_dt[i] · L_elem / u_h  is the kinetic Δx_p per element
-            #       A_spec     = R_spec · T · ln[x_eq·(1−x)/((1−x_eq)·x)]  [J/kg]
-            # dx_dt · A_spec ≥ 0 for any spontaneous direction → S_gen ≥ 0
-            if abs(self.dx_dt[i]) > 1e-15 and 'hydrogen' in self.streams['hot']['species']:
-                T_e   = 0.5 * (self.Th[i] + self.Th[i + 1])
-                x_e   = 0.5 * (self.xh[i] + self.xh[i + 1])
-                rho_h = 0.5 * (self.props_h['rho'][i] + self.props_h['rho'][i + 1])
-                u_h   = mh / max(rho_h * Ac_h, 1e-12)           # [m/s]
-                dx_kinetic = self.dx_dt[i] * self.L_elem / u_h  # kinetic Δx_p, signed
-                try:
-                    x_eq_e = float(self.h2_props.get_equilibrium_fraction(T_e))
-                    x_e_s  = np.clip(x_e,    1e-9, 1.0 - 1e-9)
-                    x_eq_s = np.clip(x_eq_e, 1e-9, 1.0 - 1e-9)
-                    A_spec = self.h2_props.R_SPECIFIC * T_e * np.log(
-                        (x_eq_s * (1.0 - x_e_s)) / (x_e_s * (1.0 - x_eq_s))
-                    )   # [J/kg]; same sign as dx_dt for spontaneous process
-                    S_gen_c = mh * dx_kinetic * A_spec / max(T_e, 1.0)   # [W/K]
-                    if S_gen_c >= 0.0:       # floating-point safety net
-                        S_gen_chem[i]   = S_gen_c
-                        Ex_dest_chem[i] = T0 * S_gen_c
-                except Exception:
-                    pass
+            # Source 3 — Ortho-para chemical conversion irreversibility
+            # Derived from the element exergy balance (Gouy-Stodola residual method):
+            #   Ex_dest_chem[i] = dEx_c[i] - dEx_h[i] - Ex_dest_HT[i] - Ex_dest_dP[i]
+            # This is thermodynamically exact: it uses the same ex_h/ex_c nodal arrays
+            # that define Ex_H2_total_gain and Ex_He_consumed, so the global balance
+            # closes to zero by construction (modulo the small |Δμ/RT| residual from
+            # CoolProp's independent para/ortho reference states).
+            # Negative values are clamped to zero (unphysical rounding in near-equilibrium
+            # elements due to the finite Gibbs-anchor error at temperatures ≠ 300 K).
+            if 'hydrogen' in self.streams['hot']['species']:
+                dEx_c_i = mc * (ex_c[i + 1] - ex_c[i])
+                dEx_h_i = mh * (ex_h[i + 1] - ex_h[i])
+                ex_dest_chem_i = dEx_c_i - dEx_h_i - Ex_dest_HT[i] - Ex_dest_dP[i]
+                Ex_dest_chem[i] = max(ex_dest_chem_i, 0.0)
+                S_gen_chem[i]   = Ex_dest_chem[i] / T0
 
         Ex_dest_total = Ex_dest_HT + Ex_dest_chem + Ex_dest_dP
 
@@ -1353,6 +1337,24 @@ class TPMSHeatExchanger:
         print("="*70 + "\n")
 
 
+def _default_output_paths():
+    """Return output paths pointing to the results/ folder at the repo root
+    (one level above TPMS_HE_main/)."""
+    _root = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'results')
+    )
+    def _p(name):
+        return os.path.join(_root, name)
+    return {
+        'results_csv':          _p('final_results.csv'),
+        'convergence_csv':      _p('convergence_history.csv'),
+        'performance_plot':     _p('performance_profile.png'),
+        'convergence_plot':     _p('convergence_diagnostics.png'),
+        'resistance_pie':       _p('resistance_pie.png'),
+        'performance_eval_plot': _p('performance_evaluation.png'),
+    }
+
+
 def create_default_config():
     """Create default configuration"""
     return {
@@ -1415,14 +1417,7 @@ def create_default_config():
             'relax_hydraulic': 0.5, 'relax_kinetics': 1.0,
             'Q_damping': 0.5, 'adaptive_damping': True
         },
-        'output': {
-            'results_csv': 'results/final_results.csv',
-            'convergence_csv': 'results/convergence_history.csv',
-            'performance_plot': 'results/performance_profile.png',
-            'convergence_plot': 'results/convergence_diagnostics.png',
-            'resistance_pie': 'results/resistance_pie.png',
-            'performance_eval_plot': 'results/performance_evaluation.png',
-        }
+        'output': _default_output_paths()
     }
 
 

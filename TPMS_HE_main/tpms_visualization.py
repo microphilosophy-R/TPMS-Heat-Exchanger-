@@ -513,8 +513,8 @@ class TPMSVisualizer:
         ax.axhline(perf['PEC_mean_h'], color=col_hot,  ls='--', lw=0.8, alpha=0.6)
         ax.axhline(perf['PEC_mean_c'], color=col_cold, ls='--', lw=0.8, alpha=0.6)
         ax.set_xlabel(r'Normalised position $\xi$')
-        ax.set_ylabel(r'PEC $= j\,/\,f^{1/3}$')
-        ax.set_title(r'(c) Performance Evaluation Criterion  PEC $= j/f^{1/3}$')
+        ax.set_ylabel(r'PEC = $j\,/\,f^{1/3}$')
+        ax.set_title(r'(c) Performance Evaluation Criterion  PEC = $j/f^{1/3}$')
         ax.legend(fontsize=7)
         ax.grid(True, alpha=0.3)
 

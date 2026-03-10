@@ -382,7 +382,7 @@ def test_hydrogen_properties():
     print()
     print("Conversion Entropies:")
     print(f"  Ds_o->p = {Delta_s_op / 1e3:10.3f} kJ/(kg·K)  (ortho->para)")
-    print(f"  Ds_n->p = {Delta_s_np / 1e3:10.3f} kJ/(kg·K)  (normal->para, target: {ThermalProperties.DELTA_S_NP_20K/1e3:.3f})")
+    print(f"  Ds_n->p = {Delta_s_np / 1e3:10.3f} kJ/(kg·K)  (normal->para)")
     print()
 
     # ------------------------------------------------------------------

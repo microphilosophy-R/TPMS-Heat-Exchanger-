@@ -1294,7 +1294,7 @@ def render_step_output(state):
     )
 
 def _summary_df(rows):
-    return pd.DataFrame(rows, columns=["Parameter", "Value"])
+    return pd.DataFrame([(p, str(v)) for p, v in rows], columns=["Parameter", "Value"])
 
 
 def render_summary_table(state, issues):
@@ -1430,21 +1430,27 @@ def run_simulation(state):
             max_iter=cfg["solver"]["max_iter"],
             tolerance=cfg["solver"]["tolerance"],
         )
-        he.finalize_simulation()
-        return {
-            "error": None,
-            "converged": converged,
-            "q_total": float(he.Q.sum()),
-            "hot_out": float(he.Th[-1]),
-            "cold_out": float(he.Tc[0]),
-            "eta_ex":     he.perf.get('eta_ex',      None),
-            "S_gen":      he.perf.get('S_gen_total',  None),
-            "PEC_mean_h": he.perf.get('PEC_mean_h',  None),
-            "PEC_mean_c": he.perf.get('PEC_mean_c',  None),
-            "output": copy.deepcopy(cfg["output"]),
-        }
     except Exception as exc:
         return {"error": str(exc)}
+
+    result = {
+        "error": None,
+        "converged": converged,
+        "q_total": float(he.Q.sum()),
+        "hot_out": float(he.Th[-1]),
+        "cold_out": float(he.Tc[0]),
+        "eta_ex":     he.perf.get('eta_ex',      None),
+        "S_gen":      he.perf.get('S_gen_total',  None),
+        "PEC_mean_h": he.perf.get('PEC_mean_h',  None),
+        "PEC_mean_c": he.perf.get('PEC_mean_c',  None),
+        "output": copy.deepcopy(cfg["output"]),
+    }
+    try:
+        he.finalize_simulation()
+        result["output"] = copy.deepcopy(he.config["output"])
+    except Exception as exc:
+        result["warning"] = f"Outputs partially failed: {exc}"
+    return result
 
 
 def render_run_result():
@@ -1464,6 +1470,8 @@ def render_run_result():
         return
 
     st.success("Simulation finished")
+    if result.get("warning"):
+        st.warning(result["warning"])
     st.write(f"Converged: `{result['converged']}`")
     c1, c2, c3 = st.columns(3)
     c1.metric("Q_total [W]", f"{result['q_total']:.2f}")

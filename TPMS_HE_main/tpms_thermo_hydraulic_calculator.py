@@ -32,6 +32,38 @@ warnings.filterwarnings("ignore")
 SUPPORTED_CHANNEL_MODES = ("bare", "packed")
 
 
+def plate_fin_fin_efficiency(h, Hf, tf, k_wall, Af_Ah_ratio):
+    """
+    Weighted overall fin efficiency for perforated plate fins (Wang et al. 2024, Eqs. 10–12).
+
+        η_f = tanh(m·Hf) / (m·Hf)     where m = sqrt(2h / (k_wall · tf))
+        η_h = 1 - (Af/Ah) · (1 - η_f)
+
+    Parameters
+    ----------
+    h : float           Local convective HTC [W/m²·K]
+    Hf : float          Fin height [m]
+    tf : float          Fin thickness [m]
+    k_wall : float      Fin material thermal conductivity [W/m·K]
+    Af_Ah_ratio : float Secondary (fin) area / total area ratio [-]
+
+    Returns
+    -------
+    eta_h : float       Overall weighted fin efficiency [-]
+    """
+    if h <= 0 or k_wall <= 0 or tf <= 0:
+        return 1.0
+    m  = np.sqrt(2.0 * h / (k_wall * tf))
+    mL = m * Hf
+    if mL < 0.01:
+        eta_f = 1.0
+    elif mL > 20.0:
+        eta_f = 1.0 / mL
+    else:
+        eta_f = np.tanh(mL) / mL
+    return 1.0 - Af_Ah_ratio * (1.0 - eta_f)
+
+
 def _infer_fluid_type(species):
     species_key = str(species).lower()
     if "water" in species_key:
@@ -121,6 +153,10 @@ def _normalize_single_channel(cfg, stream_key):
             "height":         ch_geo_raw.get("height",         None),
             "unit_cell_size": ch_geo_raw.get("unit_cell_size", None),
             "wall_thickness": ch_geo_raw.get("wall_thickness", None),
+            # PlateFin-specific fin geometry (None = inherit global)
+            "fin_height":     ch_geo_raw.get("fin_height",     None),
+            "fin_spacing":    ch_geo_raw.get("fin_spacing",    None),
+            "fin_thickness":  ch_geo_raw.get("fin_thickness",  None),
         },
     }
     if ch_sad is not None:
@@ -165,6 +201,12 @@ def normalize_config(config):
     geo.setdefault("height", 0.25)
     geo.setdefault("unit_cell_size", 5e-3)
     geo.setdefault("wall_thickness", 0.5e-3)
+    # PlateFin geometry defaults (Wang et al. 2024, Table 2 hot-side values)
+    geo.setdefault("fin_height",    9.5e-3)   # Hf [m]
+    geo.setdefault("fin_spacing",   3.2e-3)   # sf [m]
+    geo.setdefault("fin_thickness", 0.6e-3)   # tf [m]
+    geo.setdefault("perf_density",  0.0)      # perforations per m² of fin face
+    geo.setdefault("perf_radius",   0.0)      # perforation radius [m]
     geo.setdefault("plate_thickness", 1.0e-3)
     geo.setdefault("surface_area_density", 60)
     geo.setdefault("porosity_hot", 0.65)
@@ -223,17 +265,22 @@ class TPMSHeatExchanger:
         self.N = self.config['solver']['n_elements']
 
         def _ch_geo(sk):
-            """Return (L, W, H, Lc, tw) for channel sk, falling back to global geometry."""
+            """Return (L, W, H, Lc, tw, Hf, sf, tf) for channel sk, falling back to global geometry."""
             ch_geo = self.config['channels'][sk].get('geometry', {}) or {}
-            L  = ch_geo.get('length')         or self.config['geometry']['length']
-            W  = ch_geo.get('width')          or self.config['geometry']['width']
-            H  = ch_geo.get('height')         or self.config['geometry']['height']
-            Lc = ch_geo.get('unit_cell_size') or self.config['geometry']['unit_cell_size']
-            tw = ch_geo.get('wall_thickness') or self.config['geometry']['wall_thickness']
-            return float(L), float(W), float(H), float(Lc), float(tw)
+            g = self.config['geometry']
+            L  = ch_geo.get('length')         or g['length']
+            W  = ch_geo.get('width')          or g['width']
+            H  = ch_geo.get('height')         or g['height']
+            Lc = ch_geo.get('unit_cell_size') or g['unit_cell_size']
+            tw = ch_geo.get('wall_thickness') or g['wall_thickness']
+            # PlateFin fin geometry (falls back to global defaults)
+            Hf = ch_geo.get('fin_height')    or g.get('fin_height',    9.5e-3)
+            sf = ch_geo.get('fin_spacing')   or g.get('fin_spacing',   3.2e-3)
+            tf = ch_geo.get('fin_thickness') or g.get('fin_thickness', 0.6e-3)
+            return float(L), float(W), float(H), float(Lc), float(tw), float(Hf), float(sf), float(tf)
 
-        L_h, W_h, H_h, Lc_h, tw_h = _ch_geo('hot')
-        L_c, W_c, H_c, Lc_c, tw_c = _ch_geo('cold')
+        L_h, W_h, H_h, Lc_h, tw_h, Hf_h, sf_h, tf_h = _ch_geo('hot')
+        L_c, W_c, H_c, Lc_c, tw_c, Hf_c, sf_c, tf_c = _ch_geo('cold')
 
         # Per-channel surface area densities [1/m]
         alpha_h = self.config['channels']['hot']['surface_area_density']
@@ -297,6 +344,41 @@ class TPMSHeatExchanger:
                 Dh_rect = 4 * Ac_rect / (2 * (Wsk + Hsk * eps))
                 self.streams[sk]['Ac'] = Ac_rect
                 self.streams[sk]['Dh'] = Dh_rect
+
+        # 3c. PlateFin override: hydraulic diameter from fin geometry (Wang et al. 2024, Eq. 2)
+        #     Dh = 2(Hf - tf)(sf - tf) / (Hf + sf - 2tf)
+        _ch_finparams = {
+            'hot':  (Hf_h, sf_h, tf_h),
+            'cold': (Hf_c, sf_c, tf_c),
+        }
+        for sk in ('hot', 'cold'):
+            if self.streams[sk]['tpms'] == 'PlateFin':
+                Hf, sf, tf = _ch_finparams[sk]
+                eps_pf = (sf - tf) / sf
+                Wsk, Hsk = _ch_WH[sk]
+                Dh_pf = 2.0 * (Hf - tf) * (sf - tf) / max(Hf + sf - 2.0 * tf, 1e-12)
+                self.streams[sk]['Ac']  = Wsk * Hsk * eps_pf
+                self.streams[sk]['Dh']  = Dh_pf
+                self.streams[sk]['fin_height']    = Hf
+                self.streams[sk]['fin_spacing']   = sf
+                self.streams[sk]['fin_thickness'] = tf
+                # Pre-compute Af/Ah ratio for fin efficiency (Eqs. 8–10, Wang et al. 2024)
+                # Without perforations (n=0): Af = (2Hf - tf + sf - tf), Ah = (2Hf - tf + 2*(sf - tf))
+                n_d = self.config['geometry'].get('perf_density', 0.0)
+                r_p = self.config['geometry'].get('perf_radius',  0.0)
+                if n_d > 0 and r_p > 0:
+                    # Per unit HE length, Af and Ah from Eqs. 8–9 (W/sf factor cancels in ratio)
+                    Af_base = (2 * Hf - tf) + (sf - tf)
+                    Ah_base = (2 * Hf - tf) + 2 * (sf - tf)
+                    # Perforation corrections per unit area of fin face (n_d per m², L=1 m)
+                    perf_af = 3 * n_d * np.pi * r_p**2 - 2 * n_d * np.pi * (2 * r_p) * tf
+                    perf_ah = 2 * n_d * np.pi * r_p**2 - 2 * n_d * np.pi * (2 * r_p) * tf
+                    Af_val = max(Af_base - perf_af, 1e-12)
+                    Ah_val = max(Ah_base - perf_ah, 1e-12)
+                else:
+                    Af_val = (2 * Hf - tf) + (sf - tf)
+                    Ah_val = (2 * Hf - tf) + 2 * (sf - tf)
+                self.streams[sk]['Af_Ah_ratio'] = Af_val / max(Ah_val, 1e-12)
 
         # Store per-channel SAD and elemental area in stream dicts for reference
         self.streams['hot']['surface_area_density'] = alpha_h
@@ -365,6 +447,15 @@ class TPMSHeatExchanger:
             )
             htc = Nu * k_f / max(dh, 1e-12)
             details = {'mode': 'bare', 'structure': structure}
+            # PlateFin: apply weighted fin efficiency (Eqs. 10–12, Wang et al. 2024)
+            if structure == 'PlateFin':
+                Hf      = context.get('fin_height',    9.5e-3)
+                tf_fin  = context.get('fin_thickness', 0.6e-3)
+                Af_Ah   = context.get('Af_Ah_ratio',   0.5)
+                eta_h   = plate_fin_fin_efficiency(htc, Hf, tf_fin, self.k_wall, Af_Ah)
+                htc     = htc * eta_h
+                Nu      = htc * max(dh, 1e-12) / max(k_f, 1e-12)
+                details['eta_h'] = float(eta_h)
             return Nu, f, htc, details
 
         packed_model = reg['packed_model']
@@ -572,15 +663,21 @@ class TPMSHeatExchanger:
                 Pr = mu * cp / k_therm
 
                 # Heat-transfer and friction closure from level-2 registry.
+                _ctx = {
+                    'Dh': Dh,
+                    'fluid_type': s.get('fluid_type', 'Gas'),
+                }
+                # Pass PlateFin fin geometry into context for fin-efficiency calculation
+                if s.get('tpms') == 'PlateFin':
+                    _ctx['fin_height']    = s.get('fin_height',    9.5e-3)
+                    _ctx['fin_thickness'] = s.get('fin_thickness', 0.6e-3)
+                    _ctx['Af_Ah_ratio']   = s.get('Af_Ah_ratio',  0.5)
                 Nu, f, htc, details = self.get_channel_closure(
                     stream_key=stream_key,
                     Re_channel=Re,
                     Pr=Pr,
                     k_f=k_therm,
-                    context={
-                        'Dh': Dh,
-                        'fluid_type': s.get('fluid_type', 'Gas'),
-                    },
+                    context=_ctx,
                 )
 
                 # Store Data
@@ -1361,7 +1458,10 @@ def create_default_config():
         'geometry': {
             'length': 0.94, 'width': 0.25, 'height': 0.25,
             'porosity_hot': 0.65, 'porosity_cold': 0.70, 'unit_cell_size': 5e-3,
-            'wall_thickness': 0.5e-3, 'plate_thickness': 1.0e-3, 'surface_area_density': 60
+            'wall_thickness': 0.5e-3, 'plate_thickness': 1.0e-3, 'surface_area_density': 60,
+            # PlateFin geometry (Wang et al. 2024, Table 2, hot-side defaults)
+            'fin_height': 9.5e-3, 'fin_spacing': 3.2e-3, 'fin_thickness': 0.6e-3,
+            'perf_density': 0.0, 'perf_radius': 0.0,
         },
         'tpms': {'type_hot': 'Diamond', 'type_cold': 'Gyroid'},
         'channels': {
@@ -1370,7 +1470,8 @@ def create_default_config():
                 'structure': 'Diamond',
                 'surface_area_density': 60,
                 'geometry': {'length': None, 'width': None, 'height': None,
-                             'unit_cell_size': None, 'wall_thickness': None},
+                             'unit_cell_size': None, 'wall_thickness': None,
+                             'fin_height': None, 'fin_spacing': None, 'fin_thickness': None},
                 'packed': {
                     'particle_diameter': 1e-3,
                     'bed_porosity': 0.40,
@@ -1385,7 +1486,8 @@ def create_default_config():
                 'structure': 'Gyroid',
                 'surface_area_density': 60,
                 'geometry': {'length': None, 'width': None, 'height': None,
-                             'unit_cell_size': None, 'wall_thickness': None},
+                             'unit_cell_size': None, 'wall_thickness': None,
+                             'fin_height': None, 'fin_spacing': None, 'fin_thickness': None},
                 'packed': {
                     'particle_diameter': 1e-3,
                     'bed_porosity': 0.40,
@@ -1418,6 +1520,181 @@ def create_default_config():
             'Q_damping': 0.5, 'adaptive_damping': True
         },
         'output': _default_output_paths()
+    }
+
+
+# ====================================================================
+# CPFHX Test Configuration — Wang et al. (2024)
+# ====================================================================
+
+# Table 6: experimental operating conditions
+# Keys: (back_pressure_MPa, flowrate_ratio_r)
+# Values: inlet/outlet temperatures [K] and H₂ temperature drop [K]
+# Cold (He) outlet temperatures available only for 1.04 MPa conditions.
+_CPFHX_TABLE6 = {
+    (1.04, 2.4): dict(Th_in=63.8, Tc_in=42.8, Th_out_exp=55.9, Tc_out_exp=61.7, dT_H2=7.9),
+    (1.04, 2.7): dict(Th_in=63.1, Tc_in=42.8, Th_out_exp=55.1, Tc_out_exp=60.8, dT_H2=8.0),
+    (1.04, 3.0): dict(Th_in=62.3, Tc_in=42.7, Th_out_exp=54.1, Tc_out_exp=59.7, dT_H2=8.2),
+    (1.13, 2.4): dict(Th_in=65.8, Tc_in=43.8, Th_out_exp=57.4, Tc_out_exp=None, dT_H2=8.4),
+    (1.13, 2.7): dict(Th_in=65.0, Tc_in=44.2, Th_out_exp=56.5, Tc_out_exp=None, dT_H2=8.5),
+    (1.13, 3.0): dict(Th_in=64.5, Tc_in=44.8, Th_out_exp=55.9, Tc_out_exp=None, dT_H2=8.6),
+}
+
+
+def create_cpfhx_config(back_pressure_mpa=1.04, flowrate_ratio=2.7):
+    """
+    Return a solver config for the CPFHX experiment of Wang et al. (2024).
+
+    Geometry (Table 2):
+        Core unit: L = 0.47 m, W = 0.15 m, per-stream H ≈ 0.032 m
+        Hot fins:  Hf=9.5 mm, sf=3.2 mm, tf=0.6 mm  → SAD≈776 m⁻¹, ε=0.8125, Dh≈4.0 mm
+        Cold fins: Hf=9.5 mm, sf=1.0 mm, tf=0.2 mm  → SAD≈2147 m⁻¹, ε=0.80,   Dh≈1.5 mm
+
+    Operating conditions (Table 6):
+        m_H2 = 1.0 g/s,  m_He = flowrate_ratio × m_H2
+        Ph_in = Pc_in = back_pressure_mpa × 1e6 Pa
+        xh_in = 0.25  (normal hydrogen feed, 25 % para-H₂)
+
+    Parameters
+    ----------
+    back_pressure_mpa : float
+        Test back pressure in MPa.  Valid values: 1.04, 1.13.
+    flowrate_ratio : float
+        Mass-flow ratio r = m_He / m_H2.  Valid values: 2.4, 2.7, 3.0.
+
+    Returns
+    -------
+    config : dict
+        Fully normalised solver configuration.  A '_cpfhx_ref' key stores the
+        experimental reference outlet temperatures for post-run comparison.
+    """
+    key = (float(back_pressure_mpa), float(flowrate_ratio))
+    if key not in _CPFHX_TABLE6:
+        raise ValueError(
+            f"Unknown CPFHX condition {key}. "
+            f"Valid keys: {sorted(_CPFHX_TABLE6.keys())}"
+        )
+    cond = _CPFHX_TABLE6[key]
+
+    # ── Fin geometry (Table 2) ──────────────────────────────────────────────
+    Hf   = 9.5e-3          # fin height [m]  — same for hot and cold
+    sf_h = 3.2e-3;  tf_h = 0.6e-3   # hot fin pitch / thickness [m]
+    sf_c = 1.0e-3;  tf_c = 0.2e-3   # cold fin pitch / thickness [m]
+
+    # Compute SAD from Eq. 9 (without perforations)
+    def _sad(Hf_, sf_, tf_):
+        return ((2 * Hf_ - tf_) + 2 * (sf_ - tf_)) / (sf_ * Hf_)
+
+    sad_h = _sad(Hf, sf_h, tf_h)   # ≈ 776  m⁻¹
+    sad_c = _sad(Hf, sf_c, tf_c)   # ≈ 2147 m⁻¹
+    eps_h = (sf_h - tf_h) / sf_h   # 0.8125
+    eps_c = (sf_c - tf_c) / sf_c   # 0.80
+
+    # ── Mass flow rates ────────────────────────────────────────────────────
+    m_h2 = 1.0e-3                          # kg/s  (confirmed by user)
+    m_he = float(flowrate_ratio) * m_h2
+
+    P_op = float(back_pressure_mpa) * 1e6  # Pa — same pressure for both sides
+
+    return {
+        'geometry': {
+            'length':       0.47,       # core-unit length [m]
+            'width':        0.15,       # core-unit width [m]
+            'height':       0.032,      # per-stream effective height [m] (≈ H_total / 2)
+            'unit_cell_size':  5e-3,    # not used (PlateFin), kept for UI compatibility
+            'wall_thickness':  tf_h,    # hot fin thickness (→ fin efficiency)
+            'plate_thickness': 1.2e-3,  # dividing-plate thickness [m]  (Table 2)
+            'porosity_hot':    eps_h,
+            'porosity_cold':   eps_c,
+            'surface_area_density': sad_h,   # hot-side global default
+            # PlateFin fin geometry (global defaults = hot-side values)
+            'fin_height':    Hf,
+            'fin_spacing':   sf_h,
+            'fin_thickness': tf_h,
+            'perf_density':  0.0,
+            'perf_radius':   0.0,
+            'identical_channels': False,
+        },
+        'tpms': {'type_hot': 'PlateFin', 'type_cold': 'PlateFin'},
+        'channels': {
+            'hot': {
+                'mode':      'packed',
+                'structure': 'PlateFin',
+                'surface_area_density': sad_h,
+                'geometry': {
+                    'length':  0.47,  'width':  0.15,  'height': 0.032,
+                    'unit_cell_size': None, 'wall_thickness': None,
+                    'fin_height':   Hf,
+                    'fin_spacing':  sf_h,
+                    'fin_thickness': tf_h,
+                },
+                'packed': {
+                    'particle_diameter': 1.5e-3,   # ortho-para catalyst pellet [m]
+                    'bed_porosity':      0.40,
+                    'k_solid':           10.0,      # Fe₂O₃/Al₂O₃ catalyst [W/m·K]
+                    'shape_factor':      1.0,
+                    'mode':             'nominal',
+                    'htc_model':        'martin_nilles',
+                },
+            },
+            'cold': {
+                'mode':      'bare',
+                'structure': 'PlateFin',
+                'surface_area_density': sad_c,
+                'geometry': {
+                    'length':  0.47,  'width':  0.15,  'height': 0.032,
+                    'unit_cell_size': None, 'wall_thickness': None,
+                    'fin_height':   Hf,
+                    'fin_spacing':  sf_c,
+                    'fin_thickness': tf_c,
+                },
+                'packed': {
+                    'particle_diameter': 1e-3,
+                    'bed_porosity':      0.40,
+                    'k_solid':           10.0,
+                    'shape_factor':      1.0,
+                    'mode':             'nominal',
+                    'htc_model':        'martin_nilles',
+                },
+            },
+        },
+        'material': {'k_wall': 237.0},   # aluminium
+        'operating': {
+            'fluid_hot':  'hydrogen mixture',
+            'fluid_cold': 'helium',
+            'Th_in':  float(cond['Th_in']),
+            'Tc_in':  float(cond['Tc_in']),
+            'Ph_in':  P_op,
+            'Pc_in':  P_op,
+            'mh':     m_h2,
+            'mc':     m_he,
+            'xh_in':  0.25,   # normal hydrogen feed (25 % para-H₂)
+        },
+        'catalyst': {
+            'particle_diameter': 1.5e-3,
+            'bed_porosity':      0.40,
+            'k_solid':           10.0,
+            'shape_factor':      1.0,
+        },
+        'solver': {
+            'n_elements':     100,
+            'max_iter':       500,
+            'tolerance':      1e-3,
+            'relax_thermal':  0.15,
+            'relax_hydraulic': 0.5,
+            'relax_kinetics': 1.0,
+            'Q_damping':      0.5,
+        },
+        'output': _default_output_paths(),
+        # Experimental reference values (Table 6) — used for post-run comparison
+        '_cpfhx_ref': {
+            'back_pressure_mpa': back_pressure_mpa,
+            'flowrate_ratio':    flowrate_ratio,
+            'Th_out_exp':        cond.get('Th_out_exp'),
+            'Tc_out_exp':        cond.get('Tc_out_exp'),
+            'dT_H2':             cond.get('dT_H2'),
+            'source':            'Wang et al. (2024), Int. J. Hydrogen Energy 110, 814-825, Table 6',
+        },
     }
 
 

@@ -19,7 +19,7 @@ class TPMSCorrelations:
     """
 
     SUPPORTED_TPMS_TYPES = ('Gyroid', 'Diamond', 'Primitive', 'Neovius', 'FRD', 'FKS',
-                             'SmoothPlateFin')
+                             'SmoothPlateFin', 'PlateFin')
     
     # Prandtl numbers for common fluids
     PR_WATER = 6.0
@@ -75,6 +75,7 @@ class TPMSCorrelations:
             'FRD': TPMSCorrelations._frd_correlations,
             'FKS': TPMSCorrelations._fks_correlations,
             'SmoothPlateFin': TPMSCorrelations._smooth_plate_fin_correlations,
+            'PlateFin': TPMSCorrelations._plate_fin_correlations,
         }
 
         if tpms_type not in correlation_map:
@@ -322,6 +323,41 @@ class TPMSCorrelations:
             Nu = 0.52 * Re**0.61 * Pr**0.4
             f = 2.1335 * Re**(-0.1334)
         
+        return Nu, f
+
+
+    @staticmethod
+    def _plate_fin_correlations(Re, Pr, fluid_type):
+        """
+        Perforated plate-fin (CPFHX) correlations — Wang et al. (2024) / Li (2018).
+
+        Colburn j-factor for cold-side perforated fins (Eq. 3 in Wang et al. 2024):
+            ln(j) = -2.64136e-2*(ln Re)^3 + 0.55584*(ln Re)^2 - 4.09241*ln(Re) + 6.21681
+            Nu    = j * Re * Pr^(1/3)
+
+        Friction factor: empirical approximation for perforated plate fins.
+            f ≈ 2.5 * j
+        No explicit f correlation is reported in Wang et al. (2024); this factor is an
+        engineering estimate consistent with compact perforated-fin literature.
+
+        Note: fin efficiency correction (Eqs. 10–12, Wang et al. 2024) is applied
+        separately in the solver's get_channel_closure method using the channel geometry.
+
+        References
+        ----------
+        Wang et al. (2024), Int. J. Hydrogen Energy 110, 814-825.
+        Li (2018), Doctoral thesis, South China University of Technology.
+        """
+        Re_safe = np.maximum(Re, 1.0)
+        ln_Re = np.log(Re_safe)
+        # Eq. 3 — cubic coefficient is NEGATIVE
+        ln_j = (-2.64136e-2 * ln_Re**3
+                + 0.55584   * ln_Re**2
+                - 4.09241   * ln_Re
+                + 6.21681)
+        j  = np.exp(ln_j)
+        Nu = j * Re_safe * Pr**(1.0 / 3.0)
+        f  = 2.5 * j
         return Nu, f
 
 

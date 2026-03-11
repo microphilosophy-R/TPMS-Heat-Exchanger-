@@ -65,10 +65,13 @@ class PackedBedTPMSModel:
         self.k_s = catalyst_config['k_solid']
         self.sphericity = catalyst_config.get('shape_factor', 1.0)
 
-        # TPMS几何参数
+        # TPMS/PlateFin几何参数
         self.D_h = tpms_geometry['D_h']
         self.t_wall = tpms_geometry['wall_thickness']
         self.k_wall = tpms_geometry['k_wall']
+        # PlateFin-specific: fin height and Af/Ah ratio for plate-fin efficiency (Eqs. 10–12)
+        self.fin_height_for_eff = tpms_geometry.get('fin_height', None)
+        self.Af_Ah_ratio        = tpms_geometry.get('Af_Ah_ratio', None)
 
         if self.d_p <= 0:
             raise ValueError("particle_diameter must be > 0")
@@ -304,35 +307,50 @@ class PackedBedTPMSModel:
 
     def tpms_fin_efficiency(self, h_local):
         """
-        TPMS壁面作为翅片深入填充床的增强效率。
+        Fin efficiency for TPMS or PlateFin channels.
 
-        将TPMS壁面建模为长度 L_fin ≈ D_h/4 的翅片,
-        在局部对流系数 h_local 下计算翅片效率。
+        For TPMS: models the TPMS wall as a fin of length L_fin ≈ D_h/4.
+        For PlateFin: uses the perforated-fin formulas (Wang et al. 2024, Eqs. 10–12):
+            η_f = tanh(m·Hf)/(m·Hf),  m = sqrt(2h/(k_wall·tf))
+            η_h = 1 − (Af/Ah)·(1 − η_f)
 
         Parameters
         ----------
         h_local : float
-            局部对流换热系数 [W/m²·K]
+            Local convective HTC [W/m²·K]
 
         Returns
         -------
         eta : float
-            翅片效率 [-], 范围 (0, 1]
+            Fin efficiency [-], range (0, 1]
         """
-        L_fin = self.D_h / 4.0
-
         if h_local <= 0 or self.k_wall <= 0 or self.t_wall <= 0:
             return 1.0
 
-        m = np.sqrt(2.0 * h_local / (self.k_wall * self.t_wall))
-        mL = m * L_fin
-
-        if mL < 0.01:
-            return 1.0
-        elif mL > 20.0:
-            return 1.0 / mL
+        if self.fin_height_for_eff is not None:
+            # PlateFin: Eqs. 11–12 for η_f, then Eq. 10 for η_h
+            Hf = self.fin_height_for_eff
+            m  = np.sqrt(2.0 * h_local / (self.k_wall * self.t_wall))
+            mL = m * Hf
+            if mL < 0.01:
+                eta_f = 1.0
+            elif mL > 20.0:
+                eta_f = 1.0 / mL
+            else:
+                eta_f = np.tanh(mL) / mL
+            Af_Ah = self.Af_Ah_ratio if self.Af_Ah_ratio is not None else 0.5
+            return 1.0 - Af_Ah * (1.0 - eta_f)
         else:
-            return np.tanh(mL) / mL
+            # TPMS: approximate fin half-length as D_h/4
+            L_fin = self.D_h / 4.0
+            m  = np.sqrt(2.0 * h_local / (self.k_wall * self.t_wall))
+            mL = m * L_fin
+            if mL < 0.01:
+                return 1.0
+            elif mL > 20.0:
+                return 1.0 / mL
+            else:
+                return np.tanh(mL) / mL
 
     # ================================================================
     # 4. 综合壁面传热系数 (含区间估计)
@@ -726,13 +744,45 @@ def create_packed_bed_model(config, stream_key='hot',
     porosity_key = f'porosity_{stream_key}'
     porosity_default = 0.65 if stream_key == 'hot' else 0.70
     porosity = config['geometry'].get(porosity_key, porosity_default)
-    cell_size = cell_size_override if cell_size_override is not None else geo['unit_cell_size']
-    D_h = 4.0 * porosity * cell_size / (2.0 * np.pi)
+
+    structure  = config.get('channels', {}).get(stream_key, {}).get('structure', '')
+    ch_geo_raw = config.get('channels', {}).get(stream_key, {}).get('geometry', {}) or {}
+
+    if structure == 'PlateFin':
+        # PlateFin: use fin-geometry hydraulic diameter (Wang et al. 2024, Eq. 2)
+        Hf = ch_geo_raw.get('fin_height')    or geo.get('fin_height',    9.5e-3)
+        sf = ch_geo_raw.get('fin_spacing')   or geo.get('fin_spacing',   3.2e-3)
+        tf = ch_geo_raw.get('fin_thickness') or geo.get('fin_thickness', 0.6e-3)
+        D_h       = 2.0 * (Hf - tf) * (sf - tf) / max(Hf + sf - 2.0 * tf, 1e-12)
+        t_wall_eff = tf   # fin thickness acts as the fin wall thickness
+        fin_height_eff = Hf
+        # Af/Ah ratio (no perforations by default)
+        n_d = geo.get('perf_density', 0.0)
+        r_p = geo.get('perf_radius',  0.0)
+        if n_d > 0 and r_p > 0:
+            Af_base = (2 * Hf - tf) + (sf - tf)
+            Ah_base = (2 * Hf - tf) + 2 * (sf - tf)
+            perf_af = 3 * n_d * np.pi * r_p**2 - 2 * n_d * np.pi * (2 * r_p) * tf
+            perf_ah = 2 * n_d * np.pi * r_p**2 - 2 * n_d * np.pi * (2 * r_p) * tf
+            Af_Ah_ratio = max(Af_base - perf_af, 1e-12) / max(Ah_base - perf_ah, 1e-12)
+        else:
+            Af_val = (2 * Hf - tf) + (sf - tf)
+            Ah_val = (2 * Hf - tf) + 2 * (sf - tf)
+            Af_Ah_ratio = Af_val / max(Ah_val, 1e-12)
+    else:
+        # TPMS: existing formula
+        cell_size  = cell_size_override if cell_size_override is not None else geo['unit_cell_size']
+        D_h        = 4.0 * porosity * cell_size / (2.0 * np.pi)
+        t_wall_eff = t_wall_override if t_wall_override is not None else geo['wall_thickness']
+        fin_height_eff = None
+        Af_Ah_ratio    = None
 
     tpms_geometry = {
-        'D_h': D_h,
-        'wall_thickness': t_wall_override if t_wall_override is not None else geo['wall_thickness'],
-        'k_wall': config['material']['k_wall'],
+        'D_h':          D_h,
+        'wall_thickness': t_wall_eff,
+        'k_wall':       config['material']['k_wall'],
+        'fin_height':   fin_height_eff,   # None → TPMS logic; Hf → PlateFin logic
+        'Af_Ah_ratio':  Af_Ah_ratio,
     }
 
     return PackedBedTPMSModel(catalyst_config, tpms_geometry)

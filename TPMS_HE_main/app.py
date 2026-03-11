@@ -10,7 +10,10 @@ import streamlit as st
 
 from packed_bed_model import SUPPORTED_PACKED_MODES
 from tpms_correlations import TPMSCorrelations
-from tpms_thermo_hydraulic_calculator import TPMSHeatExchanger, create_default_config
+from tpms_thermo_hydraulic_calculator import (
+    TPMSHeatExchanger, create_default_config,
+    create_cpfhx_config, _CPFHX_TABLE6,
+)
 
 APP_DIR = Path(__file__).resolve().parent
 AUTOSAVE_PATH = APP_DIR / ".streamlit" / "tpms_ui_state.json"
@@ -135,6 +138,20 @@ def init_ui_state():
 
 def reset_to_defaults():
     st.session_state.ui_state = _extract_ui_state(create_default_config())
+    st.session_state.current_step = 0
+    st.session_state.ui_version += 1
+    st.session_state.run_result = None
+    maybe_autosave(force=True)
+    st.rerun()
+
+
+def load_cpfhx_preset(back_pressure_mpa, flowrate_ratio):
+    """Load the CPFHX test configuration (Wang et al. 2024) into UI state."""
+    cfg = create_cpfhx_config(back_pressure_mpa, flowrate_ratio)
+    defaults = _extract_ui_state(create_default_config())
+    preset_state = _extract_ui_state(cfg)
+    merged, _ = sanitize_ui_state(preset_state, defaults)
+    st.session_state.ui_state = merged
     st.session_state.current_step = 0
     st.session_state.ui_version += 1
     st.session_state.run_result = None
@@ -453,6 +470,51 @@ def render_step_geometry(state):
             key=_k("geom_por_cold"),
         )
 
+    # --- PlateFin fin geometry (global defaults) ---
+    with st.expander("Plate-fin geometry (used when structure = PlateFin)", expanded=False):
+        pf1, pf2, pf3 = st.columns(3)
+        state["geometry"]["fin_height"] = pf1.number_input(
+            "Fin height Hf [m]",
+            min_value=1e-4,
+            value=float(state["geometry"].get("fin_height", 9.5e-3)),
+            format="%.5f",
+            key=_k("geom_fin_H"),
+            help="Distance between the two plates (fin height). Used for plate-fin Dh and fin efficiency.",
+        )
+        state["geometry"]["fin_spacing"] = pf2.number_input(
+            "Fin spacing sf [m]",
+            min_value=1e-5,
+            value=float(state["geometry"].get("fin_spacing", 3.2e-3)),
+            format="%.5f",
+            key=_k("geom_fin_s"),
+            help="Center-to-center fin pitch. Determines porosity ε = (sf−tf)/sf.",
+        )
+        state["geometry"]["fin_thickness"] = pf3.number_input(
+            "Fin thickness tf [m]",
+            min_value=1e-6,
+            value=float(state["geometry"].get("fin_thickness", 0.6e-3)),
+            format="%.6f",
+            key=_k("geom_fin_t"),
+            help="Fin wall thickness. Used in hydraulic diameter Eq. 2 and fin efficiency Eqs. 11–12.",
+        )
+        pf4, pf5 = st.columns(2)
+        state["geometry"]["perf_density"] = pf4.number_input(
+            "Perforation density n [1/m²]",
+            min_value=0.0,
+            value=float(state["geometry"].get("perf_density", 0.0)),
+            format="%.1f",
+            key=_k("geom_perf_n"),
+            help="Number of perforations per m² of fin face area (Eqs. 8–9). Set to 0 to ignore.",
+        )
+        state["geometry"]["perf_radius"] = pf5.number_input(
+            "Perforation radius r [m]",
+            min_value=0.0,
+            value=float(state["geometry"].get("perf_radius", 0.0)),
+            format="%.5f",
+            key=_k("geom_perf_r"),
+            help="Radius of each perforation hole [m] (Eqs. 8–9). Used only when perf_density > 0.",
+        )
+
     # --- Per-channel geometry toggle ---
     identical = st.toggle(
         "Identical hot/cold geometry (same L, W, H, unit cell, skeleton)",
@@ -487,20 +549,50 @@ def render_step_geometry(state):
                 value=float(geo_h.get("height") or state["geometry"]["height"]),
                 key=_k("ch_hot_H"),
             )
-            if hot_structure != "SmoothPlateFin":
+            if hot_structure == "PlateFin":
+                geo_h["fin_height"] = st.number_input(
+                    "Hot fin height Hf [m]", min_value=1e-4,
+                    value=float(geo_h.get("fin_height") or state["geometry"].get("fin_height", 9.5e-3)),
+                    format="%.5f", key=_k("ch_hot_fin_H"),
+                )
+                geo_h["fin_spacing"] = st.number_input(
+                    "Hot fin spacing sf [m]", min_value=1e-5,
+                    value=float(geo_h.get("fin_spacing") or state["geometry"].get("fin_spacing", 3.2e-3)),
+                    format="%.5f", key=_k("ch_hot_fin_s"),
+                )
+                geo_h["fin_thickness"] = st.number_input(
+                    "Hot fin thickness tf [m]", min_value=1e-6,
+                    value=float(geo_h.get("fin_thickness") or state["geometry"].get("fin_thickness", 0.6e-3)),
+                    format="%.6f", key=_k("ch_hot_fin_t"),
+                )
+                geo_h["unit_cell_size"] = None
+                geo_h["wall_thickness"] = None
+            elif hot_structure != "SmoothPlateFin":
                 geo_h["unit_cell_size"] = st.number_input(
                     "Hot unit cell size [m]", min_value=1e-6,
                     value=float(geo_h.get("unit_cell_size") or state["geometry"]["unit_cell_size"]),
                     format="%.6f", key=_k("ch_hot_cell"),
                 )
+                geo_h["wall_thickness"] = st.number_input(
+                    "Hot skeleton thickness [m]", min_value=1e-7,
+                    value=float(geo_h.get("wall_thickness") or state["geometry"]["wall_thickness"]),
+                    format="%.6f", key=_k("ch_hot_tw"),
+                    help="TPMS skeleton/fin thickness for the hot channel.",
+                )
+                geo_h["fin_height"] = None
+                geo_h["fin_spacing"] = None
+                geo_h["fin_thickness"] = None
             else:
                 geo_h["unit_cell_size"] = None
-            geo_h["wall_thickness"] = st.number_input(
-                "Hot skeleton thickness [m]", min_value=1e-7,
-                value=float(geo_h.get("wall_thickness") or state["geometry"]["wall_thickness"]),
-                format="%.6f", key=_k("ch_hot_tw"),
-                help="TPMS skeleton/fin thickness for the hot channel.",
-            )
+                geo_h["wall_thickness"] = st.number_input(
+                    "Hot skeleton thickness [m]", min_value=1e-7,
+                    value=float(geo_h.get("wall_thickness") or state["geometry"]["wall_thickness"]),
+                    format="%.6f", key=_k("ch_hot_tw"),
+                    help="TPMS skeleton/fin thickness for the hot channel.",
+                )
+                geo_h["fin_height"] = None
+                geo_h["fin_spacing"] = None
+                geo_h["fin_thickness"] = None
         with col_cold:
             st.markdown("**Cold channel**")
             geo_c["length"] = st.number_input(
@@ -518,26 +610,57 @@ def render_step_geometry(state):
                 value=float(geo_c.get("height") or state["geometry"]["height"]),
                 key=_k("ch_cold_H"),
             )
-            if cold_structure != "SmoothPlateFin":
+            if cold_structure == "PlateFin":
+                geo_c["fin_height"] = st.number_input(
+                    "Cold fin height Hf [m]", min_value=1e-4,
+                    value=float(geo_c.get("fin_height") or state["geometry"].get("fin_height", 9.5e-3)),
+                    format="%.5f", key=_k("ch_cold_fin_H"),
+                )
+                geo_c["fin_spacing"] = st.number_input(
+                    "Cold fin spacing sf [m]", min_value=1e-5,
+                    value=float(geo_c.get("fin_spacing") or state["geometry"].get("fin_spacing", 3.2e-3)),
+                    format="%.5f", key=_k("ch_cold_fin_s"),
+                )
+                geo_c["fin_thickness"] = st.number_input(
+                    "Cold fin thickness tf [m]", min_value=1e-6,
+                    value=float(geo_c.get("fin_thickness") or state["geometry"].get("fin_thickness", 0.6e-3)),
+                    format="%.6f", key=_k("ch_cold_fin_t"),
+                )
+                geo_c["unit_cell_size"] = None
+                geo_c["wall_thickness"] = None
+            elif cold_structure != "SmoothPlateFin":
                 geo_c["unit_cell_size"] = st.number_input(
                     "Cold unit cell size [m]", min_value=1e-6,
                     value=float(geo_c.get("unit_cell_size") or state["geometry"]["unit_cell_size"]),
                     format="%.6f", key=_k("ch_cold_cell"),
                 )
+                geo_c["wall_thickness"] = st.number_input(
+                    "Cold skeleton thickness [m]", min_value=1e-7,
+                    value=float(geo_c.get("wall_thickness") or state["geometry"]["wall_thickness"]),
+                    format="%.6f", key=_k("ch_cold_tw"),
+                    help="TPMS skeleton/fin thickness for the cold channel.",
+                )
+                geo_c["fin_height"] = None
+                geo_c["fin_spacing"] = None
+                geo_c["fin_thickness"] = None
             else:
                 geo_c["unit_cell_size"] = None
-            geo_c["wall_thickness"] = st.number_input(
-                "Cold skeleton thickness [m]", min_value=1e-7,
-                value=float(geo_c.get("wall_thickness") or state["geometry"]["wall_thickness"]),
-                format="%.6f", key=_k("ch_cold_tw"),
-                help="TPMS skeleton/fin thickness for the cold channel.",
-            )
+                geo_c["wall_thickness"] = st.number_input(
+                    "Cold skeleton thickness [m]", min_value=1e-7,
+                    value=float(geo_c.get("wall_thickness") or state["geometry"]["wall_thickness"]),
+                    format="%.6f", key=_k("ch_cold_tw"),
+                    help="TPMS skeleton/fin thickness for the cold channel.",
+                )
+                geo_c["fin_height"] = None
+                geo_c["fin_spacing"] = None
+                geo_c["fin_thickness"] = None
     else:
         # Identical: clear per-channel overrides so solver uses global
         for sk in ("hot", "cold"):
             state["channels"][sk]["geometry"] = {
                 "length": None, "width": None, "height": None,
                 "unit_cell_size": None, "wall_thickness": None,
+                "fin_height": None, "fin_spacing": None, "fin_thickness": None,
             }
 
     st.divider()
@@ -698,6 +821,7 @@ def _compute_tpms_cross_section(tpms_type: str, unit_cell_size: float,
 
 def _render_surface_area_tab(state, tpms_type, L_cell, ch_L, ch_W, ch_H, eps, ch_label, grid_n):
     """Render surface area metrics and 'Use this value' button for one channel."""
+    geo = state["geometry"]
     if tpms_type == "SmoothPlateFin":
         sad = 2.0 / ch_H
         method = "Analytical (2/H)"
@@ -706,6 +830,30 @@ def _render_surface_area_tab(state, tpms_type, L_cell, ch_L, ch_W, ch_H, eps, ch
             f"SmoothPlateFin baseline: SAD = 2/H = **{sad:.1f} 1/m** "
             f"(two flat walls, channel height H = {ch_H*1e3:.1f} mm). "
             "Set surface_area_density to this value for a fair PEC comparison."
+        )
+    elif tpms_type == "PlateFin":
+        # SAD from heat transfer area (Eq. 9) per total volume
+        sk = ch_label.lower()
+        ch_geo_ov = state["channels"][sk].get("geometry", {}) or {}
+        Hf = float(ch_geo_ov.get("fin_height")    or geo.get("fin_height",    9.5e-3))
+        sf = float(ch_geo_ov.get("fin_spacing")   or geo.get("fin_spacing",   3.2e-3))
+        tf = float(ch_geo_ov.get("fin_thickness") or geo.get("fin_thickness", 0.6e-3))
+        n_d = float(geo.get("perf_density", 0.0))
+        r_p = float(geo.get("perf_radius",  0.0))
+        import numpy as _np
+        Ah_factor = (2 * Hf - tf) + 2 * (sf - tf)
+        if n_d > 0 and r_p > 0:
+            perf_corr = 2 * n_d * _np.pi * r_p**2 - 2 * n_d * _np.pi * (2 * r_p) * tf
+            Ah_factor = max(Ah_factor - perf_corr, 1e-12)
+        sad = Ah_factor / (sf * Hf)
+        method = "Analytical (Eq. 9, Wang et al. 2024)"
+        warn = None
+        eps_pf = (sf - tf) / sf
+        Dh_pf = 2.0 * (Hf - tf) * (sf - tf) / max(Hf + sf - 2.0 * tf, 1e-12)
+        st.info(
+            f"PlateFin: SAD = **{sad:.1f} 1/m**  "
+            f"(Hf = {Hf*1e3:.2f} mm, sf = {sf*1e3:.2f} mm, tf = {tf*1e3:.2f} mm)  \n"
+            f"Porosity ε = {eps_pf:.3f},  Dh = {Dh_pf*1e3:.3f} mm"
         )
     else:
         sad, method, warn = _compute_tpms_surface_area(tpms_type, L_cell, eps, grid_n)
@@ -740,7 +888,7 @@ def _render_cross_section_plot(hot_struct, cold_struct, L, W, H,
     MC_TYPES = ("Gyroid", "Diamond", "Primitive")
 
     def get_profile(struct, eps):
-        if struct == "SmoothPlateFin":
+        if struct in ("SmoothPlateFin", "PlateFin"):
             x_pos = np.linspace(0, L, n_slices, endpoint=False)
             areas = np.full(n_slices, eps * W * H)
             return x_pos, areas, None, None
@@ -806,7 +954,7 @@ def _render_cross_section_plot_single(struct, L_cell, W, H, eps, n_slices, sk):
     color = "#d62728" if sk == "hot" else "#1f77b4"
     label = f"{sk.capitalize()} ({struct})"
 
-    if struct == "SmoothPlateFin":
+    if struct in ("SmoothPlateFin", "PlateFin"):
         x_pos = np.linspace(0, L_cell, n_slices, endpoint=False)
         areas = np.full(n_slices, eps * W * H)
         t_iso = None
@@ -858,15 +1006,22 @@ def _render_channel_estimator(state, sk):
     ch_W   = float(ch_geo.get("width")          or geo["width"])
     ch_H   = float(ch_geo.get("height")         or geo["height"])
     L_cell = float(ch_geo.get("unit_cell_size") or geo["unit_cell_size"])
-    eps    = float(geo[f"porosity_{sk}"])
     struct = state["channels"][sk]["structure"]
+    # For PlateFin use fin-geometry porosity; otherwise use global porosity slider
+    if struct == "PlateFin":
+        sf = float(ch_geo.get("fin_spacing")   or geo.get("fin_spacing",   3.2e-3))
+        tf = float(ch_geo.get("fin_thickness") or geo.get("fin_thickness", 0.6e-3))
+        eps = (sf - tf) / sf
+    else:
+        eps = float(geo[f"porosity_{sk}"])
     GRID_N   = 80
     N_SLICES = 50
 
-    with st.expander(f"TPMS Geometry Estimator — {sk.capitalize()} channel", expanded=False):
+    title = "Plate-fin Geometry Estimator" if struct == "PlateFin" else "TPMS Geometry Estimator"
+    with st.expander(f"{title} — {sk.capitalize()} channel", expanded=False):
         st.caption(
-            f"**{struct}**  ·  ε = {eps:.2f}  ·  "
-            f"Unit cell L = {L_cell*1e3:.3f} mm  ·  "
+            f"**{struct}**  ·  ε = {eps:.3f}  ·  "
+            f"Unit cell / fin pitch L = {L_cell*1e3:.3f} mm  ·  "
             f"Channel: {ch_L*1e3:.1f} \u00d7 {ch_W*1e3:.1f} \u00d7 {ch_H*1e3:.1f} mm"
         )
         st.markdown("##### Surface Area Density")
@@ -1042,23 +1197,50 @@ def _render_tpms_bare_equations(tpms_type: str):
             'gas': (r"\mathrm{Nu} = 0.023\,\mathrm{Re}^{0.8}\,\mathrm{Pr}^{0.4}", r"f = \frac{(0.790\ln\mathrm{Re}-1.64)^{-2}}{4}", "Re > 2300 (Dittus-Boelter / Petukhov-Filonenko); laminar: Nu=3.66, f=16/Re"),
             'water': (r"\mathrm{Nu} = 0.023\,\mathrm{Re}^{0.8}\,\mathrm{Pr}^{0.4}", r"f = \frac{(0.790\ln\mathrm{Re}-1.64)^{-2}}{4}", "Re > 2300 (same correlation)"),
         },
+        'PlateFin': {
+            'gas': (
+                r"\ln j = -2.641\!\times\!10^{-2}(\ln\mathrm{Re})^3+0.556(\ln\mathrm{Re})^2"
+                r"-4.092\ln\mathrm{Re}+6.217,\quad \mathrm{Nu}=j\,\mathrm{Re}\,\mathrm{Pr}^{1/3}",
+                r"f \approx 2.5\,j \quad \text{(perforated-fin approx., no }f\text{ in paper)}",
+                "Perforated fins — Wang et al. (2024) / Li (2018)",
+            ),
+            'water': (
+                r"\ln j = -2.641\!\times\!10^{-2}(\ln\mathrm{Re})^3+0.556(\ln\mathrm{Re})^2"
+                r"-4.092\ln\mathrm{Re}+6.217,\quad \mathrm{Nu}=j\,\mathrm{Re}\,\mathrm{Pr}^{1/3}",
+                r"f \approx 2.5\,j",
+                "Same j-factor correlation applied",
+            ),
+        },
     }
     corr = corr_map.get(tpms_type)
     if not corr:
         return
-    title = ("SmoothPlateFin baseline correlations (Nu & f)"
-             if tpms_type == "SmoothPlateFin"
-             else f"{tpms_type} bare-channel correlations (Nu & f)")
+    if tpms_type == "SmoothPlateFin":
+        title = "SmoothPlateFin baseline correlations (Nu & f)"
+    elif tpms_type == "PlateFin":
+        title = "PlateFin perforated-fin correlations (Nu, f & fin efficiency)"
+    else:
+        title = f"{tpms_type} bare-channel correlations (Nu & f)"
     with st.expander(title, expanded=False):
         st.markdown(f"**Gas / Cryogenic** ({corr['gas'][2]}):")
         st.latex(corr['gas'][0])
         st.latex(corr['gas'][1])
-        st.markdown(f"**Water** ({corr['water'][2]}):")
-        st.latex(corr['water'][0])
-        st.latex(corr['water'][1])
+        if tpms_type != "PlateFin":
+            st.markdown(f"**Water** ({corr['water'][2]}):")
+            st.latex(corr['water'][0])
+            st.latex(corr['water'][1])
         st.markdown("**HTC from Nu:**")
         st.latex(r"h = \mathrm{Nu}\,k_f / D_h")
-        if tpms_type == "SmoothPlateFin":
+        if tpms_type == "PlateFin":
+            st.markdown("**Fin efficiency (Wang et al. 2024, Eqs. 10–12):**")
+            st.latex(r"m = \sqrt{\dfrac{2h}{k_w\,t_f}},\quad \eta_f = \dfrac{\tanh(m H_f)}{m H_f},\quad \eta_h = 1 - \dfrac{A_f}{A_h}(1-\eta_f)")
+            st.markdown("**Hydraulic diameter (Eq. 2):**")
+            st.latex(r"D_h = \dfrac{2(H_f - t_f)(s_f - t_f)}{H_f + s_f - 2t_f}")
+            st.caption(
+                r"$H_f$ = fin height; $s_f$ = fin spacing; $t_f$ = fin thickness; "
+                r"$k_w$ = wall conductivity; $f$ is an empirical approximation."
+            )
+        elif tpms_type == "SmoothPlateFin":
             st.caption(
                 r"$f$ = Fanning friction factor; "
                 r"$D_h = 4 A_c / P$ (rectangular duct); "
@@ -1559,6 +1741,19 @@ def main():
         reload_autosave()
     if c_top3.button("Reset Defaults"):
         reset_to_defaults()
+
+    with st.expander("CPFHX Preset — Wang et al. (2024)", expanded=False):
+        c1, c2 = st.columns(2)
+        bp    = c1.selectbox("Back pressure [MPa]", [1.04, 1.13], key="preset_bp")
+        ratio = c2.selectbox("Flowrate ratio r", [2.4, 2.7, 3.0], index=1, key="preset_r")
+        if st.button("Load preset", key="btn_load_cpfhx"):
+            load_cpfhx_preset(bp, ratio)
+        cond = _CPFHX_TABLE6.get((bp, ratio), {})
+        if cond:
+            st.caption(
+                f"Ref: T_H2,in={cond['Th_in']} K, T_He,in={cond['Tc_in']} K "
+                f"→ T_H2,out_exp≈{cond.get('Th_out_exp')} K"
+            )
 
     state = st.session_state.ui_state
     render_channel_summary_strip(state)

@@ -11,7 +11,18 @@
       "WebFetch(domain:coolprop.org)",
       "WebFetch(domain:srd.nist.gov)",
       "WebFetch(domain:tsapps.nist.gov)",
-      "Bash(del \"c:\\\\大论文\\\\code\\\\TPMS_HE\\\\TPMS_HE_main\\\\.streamlit\\\\tpms_ui_state.json\")"
+      "Bash(del \"c:\\\\大论文\\\\code\\\\TPMS_HE\\\\TPMS_HE_main\\\\.streamlit\\\\tpms_ui_state.json\")",
+      "Bash(find:*)",
+      "Read(//c//**)",
+      "Read(//c/大论文/code/**)",
+      "Read(//c/大论文/code//**)",
+      "Read(//c/大论文/**)",
+      "Bash(.venv/Scripts/python.exe:*)",
+      "Bash(wc:*)",
+      "Read(//c/Users/96997/Zotero/storage/ZZFIYBKH/**)"
+    ],
+    "additionalDirectories": [
+      "c:\\大论文\\validation\\code"
     ]
   }
 }

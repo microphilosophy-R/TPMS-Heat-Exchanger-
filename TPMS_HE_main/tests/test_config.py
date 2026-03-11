@@ -30,8 +30,7 @@ def test_default_config_has_required_keys():
 
 def test_default_config_geometry_keys():
     geo = create_default_config()["geometry"]
-    for key in ("length", "width", "height", "unit_cell_size",
-                "porosity_hot", "porosity_cold", "wall_thickness"):
+    for key in ("length", "width", "plate_thickness"):
         assert key in geo, f"geometry missing '{key}'"
 
 
@@ -43,9 +42,10 @@ def test_default_config_has_both_channels():
 # ── Dh formula check (bare TPMS: Dh = 4·ε·a / 2π) ───────────────────────────
 
 def test_dh_hot_formula():
-    geo = create_default_config()["geometry"]
-    porosity = geo["porosity_hot"]      # 0.65
-    a        = geo["unit_cell_size"]    # 5e-3 m
+    cfg = create_default_config()
+    ch_geo   = cfg["channels"]["hot"]["geometry"]
+    porosity = ch_geo["porosity"]       # 0.65
+    a        = ch_geo["unit_cell_size"] # 5e-3 m
     Dh_hot   = 4.0 * porosity * a / (2.0 * math.pi)
     assert abs(Dh_hot - 2.069e-3) < 5e-7, (
         f"Dh_hot = {Dh_hot:.5e} m, expected ≈ 2.069e-3 m"

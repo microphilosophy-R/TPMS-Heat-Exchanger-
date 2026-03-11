@@ -106,22 +106,32 @@ def _normalize_single_channel(cfg, stream_key):
 
     # Preserve per-channel surface_area_density if the user supplied it
     ch_sad = ch_cfg.get("surface_area_density", None)
-    # Preserve per-channel geometry overrides (None means "use global")
+    # Per-channel geometry — all fields owned per channel (no global fallback here)
     ch_geo_raw = ch_cfg.get("geometry", {}) or {}
+    # Defaults differ by channel
+    _por_default  = 0.65 if stream_key == "hot" else 0.70
+    # length/width inherit from global geometry (shared physical dimensions)
+    _L = ch_geo_raw.get("length") or geo.get("length", 0.94)
+    _W = ch_geo_raw.get("width")  or geo.get("width",  0.25)
     canonical = {
         "mode": mode,
         "structure": structure,
         "packed": packed_cfg,
         "geometry": {
-            "length":         ch_geo_raw.get("length",         None),
-            "width":          ch_geo_raw.get("width",          None),
-            "height":         ch_geo_raw.get("height",         None),
-            "unit_cell_size": ch_geo_raw.get("unit_cell_size", None),
-            "wall_thickness": ch_geo_raw.get("wall_thickness", None),
-            # PlateFin-specific fin geometry (None = inherit global)
-            "fin_height":     ch_geo_raw.get("fin_height",     None),
-            "fin_spacing":    ch_geo_raw.get("fin_spacing",    None),
-            "fin_thickness":  ch_geo_raw.get("fin_thickness",  None),
+            "length":         float(_L),
+            "width":          float(_W),
+            "height":         float(ch_geo_raw.get("height",         geo.get("height",         0.25))),
+            "unit_cell_size": float(ch_geo_raw.get("unit_cell_size", geo.get("unit_cell_size", 5e-3))),
+            "wall_thickness": float(ch_geo_raw.get("wall_thickness", geo.get("wall_thickness", 5e-4))),
+            # PlateFin-specific fin geometry
+            "fin_height":     float(ch_geo_raw.get("fin_height",    geo.get("fin_height",    9.5e-3))),
+            "fin_spacing":    float(ch_geo_raw.get("fin_spacing",   geo.get("fin_spacing",   3.2e-3))),
+            "fin_thickness":  float(ch_geo_raw.get("fin_thickness", geo.get("fin_thickness", 0.6e-3))),
+            "perf_density":   float(ch_geo_raw.get("perf_density",  geo.get("perf_density",  0.0))),
+            "perf_radius":    float(ch_geo_raw.get("perf_radius",   geo.get("perf_radius",   0.0))),
+            # Structural porosity (was porosity_hot/cold in global geometry)
+            "porosity":       float(ch_geo_raw.get("porosity",
+                                   geo.get(f"porosity_{stream_key}", _por_default))),
         },
     }
     if ch_sad is not None:
@@ -129,10 +139,6 @@ def _normalize_single_channel(cfg, stream_key):
     channels[stream_key] = canonical
 
     tpms_cfg[f"type_{stream_key}"] = structure
-    if stream_key == "hot":
-        geo.setdefault("porosity_hot", 0.65)
-    else:
-        geo.setdefault("porosity_cold", 0.70)
 
 
 def normalize_config(config):
@@ -163,19 +169,18 @@ def normalize_config(config):
     geo = cfg["geometry"]
     geo.setdefault("length", 0.94)
     geo.setdefault("width", 0.25)
+    geo.setdefault("plate_thickness", 1.0e-3)
+    # Keep legacy global fields as fallbacks for _normalize_single_channel migration
+    # (they are read there to back-fill per-channel geometry when not explicitly set)
     geo.setdefault("height", 0.25)
     geo.setdefault("unit_cell_size", 5e-3)
     geo.setdefault("wall_thickness", 0.5e-3)
-    # PlateFin geometry defaults (Wang et al. 2024, Table 2 hot-side values)
     geo.setdefault("fin_height",    9.5e-3)
     geo.setdefault("fin_spacing",   3.2e-3)
     geo.setdefault("fin_thickness", 0.6e-3)
     geo.setdefault("perf_density",  0.0)
     geo.setdefault("perf_radius",   0.0)
-    geo.setdefault("plate_thickness", 1.0e-3)
     geo.setdefault("surface_area_density", 60)
-    geo.setdefault("porosity_hot", 0.65)
-    geo.setdefault("porosity_cold", 0.70)
 
     material = cfg["material"]
     material.setdefault("k_wall", 237.0)
@@ -271,14 +276,24 @@ def _default_output_paths(run_subdir: str = ""):
 
 def create_default_config():
     """Create default configuration."""
+    _ch_geo_hot = {
+        'length': 0.94, 'width': 0.25, 'height': 0.25,
+        'unit_cell_size': 5e-3, 'wall_thickness': 0.5e-3,
+        'porosity': 0.65,
+        'fin_height': 9.5e-3, 'fin_spacing': 3.2e-3, 'fin_thickness': 0.6e-3,
+        'perf_density': 0.0, 'perf_radius': 0.0,
+    }
+    _ch_geo_cold = {
+        'length': 0.94, 'width': 0.25, 'height': 0.25,
+        'unit_cell_size': 5e-3, 'wall_thickness': 0.5e-3,
+        'porosity': 0.70,
+        'fin_height': 9.5e-3, 'fin_spacing': 3.2e-3, 'fin_thickness': 0.6e-3,
+        'perf_density': 0.0, 'perf_radius': 0.0,
+    }
     return {
         'geometry': {
-            'length': 0.94, 'width': 0.25, 'height': 0.25,
-            'porosity_hot': 0.65, 'porosity_cold': 0.70, 'unit_cell_size': 5e-3,
-            'wall_thickness': 0.5e-3, 'plate_thickness': 1.0e-3, 'surface_area_density': 60,
-            # PlateFin geometry (Wang et al. 2024, Table 2, hot-side defaults)
-            'fin_height': 9.5e-3, 'fin_spacing': 3.2e-3, 'fin_thickness': 0.6e-3,
-            'perf_density': 0.0, 'perf_radius': 0.0,
+            'length': 0.94, 'width': 0.25,
+            'plate_thickness': 1.0e-3,
         },
         'tpms': {'type_hot': 'Diamond', 'type_cold': 'Gyroid'},
         'channels': {
@@ -286,9 +301,7 @@ def create_default_config():
                 'mode': 'bare',
                 'structure': 'Diamond',
                 'surface_area_density': 60,
-                'geometry': {'length': None, 'width': None, 'height': None,
-                             'unit_cell_size': None, 'wall_thickness': None,
-                             'fin_height': None, 'fin_spacing': None, 'fin_thickness': None},
+                'geometry': _ch_geo_hot,
                 'packed': {
                     'particle_diameter': 1e-3,
                     'bed_porosity': 0.40,
@@ -302,9 +315,7 @@ def create_default_config():
                 'mode': 'bare',
                 'structure': 'Gyroid',
                 'surface_area_density': 60,
-                'geometry': {'length': None, 'width': None, 'height': None,
-                             'unit_cell_size': None, 'wall_thickness': None,
-                             'fin_height': None, 'fin_spacing': None, 'fin_thickness': None},
+                'geometry': _ch_geo_cold,
                 'packed': {
                     'particle_diameter': 1e-3,
                     'bed_porosity': 0.40,
@@ -398,21 +409,9 @@ def create_cpfhx_config(back_pressure_mpa=1.04, flowrate_ratio=2.7):
 
     return {
         'geometry': {
-            'length':       0.47,
-            'width':        0.15,
-            'height':       0.032,
-            'unit_cell_size':  5e-3,
-            'wall_thickness':  tf_h,
+            'length': 0.47,
+            'width':  0.15,
             'plate_thickness': 1.2e-3,
-            'porosity_hot':    eps_h,
-            'porosity_cold':   eps_c,
-            'surface_area_density': sad_h,
-            'fin_height':    Hf,
-            'fin_spacing':   sf_h,
-            'fin_thickness': tf_h,
-            'perf_density':  0.0,
-            'perf_radius':   0.0,
-            'identical_channels': False,
         },
         'tpms': {'type_hot': 'PlateFin', 'type_cold': 'PlateFin'},
         'channels': {
@@ -421,11 +420,14 @@ def create_cpfhx_config(back_pressure_mpa=1.04, flowrate_ratio=2.7):
                 'structure': 'PlateFin',
                 'surface_area_density': sad_h,
                 'geometry': {
-                    'length':  0.47,  'width':  0.15,  'height': 0.032,
-                    'unit_cell_size': None, 'wall_thickness': None,
-                    'fin_height':   Hf,
-                    'fin_spacing':  sf_h,
+                    'length': 0.47, 'width': 0.15, 'height': 0.032,
+                    'unit_cell_size': 5e-3, 'wall_thickness': tf_h,
+                    'porosity':      eps_h,
+                    'fin_height':    Hf,
+                    'fin_spacing':   sf_h,
                     'fin_thickness': tf_h,
+                    'perf_density':  0.0,
+                    'perf_radius':   0.0,
                 },
                 'packed': {
                     'particle_diameter': 1.5e-3,
@@ -441,11 +443,14 @@ def create_cpfhx_config(back_pressure_mpa=1.04, flowrate_ratio=2.7):
                 'structure': 'PlateFin',
                 'surface_area_density': sad_c,
                 'geometry': {
-                    'length':  0.47,  'width':  0.15,  'height': 0.032,
-                    'unit_cell_size': None, 'wall_thickness': None,
-                    'fin_height':   Hf,
-                    'fin_spacing':  sf_c,
+                    'length': 0.47, 'width': 0.15, 'height': 0.032,
+                    'unit_cell_size': 5e-3, 'wall_thickness': tf_c,
+                    'porosity':      eps_c,
+                    'fin_height':    Hf,
+                    'fin_spacing':   sf_c,
                     'fin_thickness': tf_c,
+                    'perf_density':  0.0,
+                    'perf_radius':   0.0,
                 },
                 'packed': {
                     'particle_diameter': 1e-3,

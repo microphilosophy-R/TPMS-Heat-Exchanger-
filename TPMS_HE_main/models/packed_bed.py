@@ -72,6 +72,9 @@ class PackedBedTPMSModel:
         # PlateFin-specific: fin height and Af/Ah ratio for plate-fin efficiency (Eqs. 10–12)
         self.fin_height_for_eff = tpms_geometry.get('fin_height', None)
         self.Af_Ah_ratio        = tpms_geometry.get('Af_Ah_ratio', None)
+        # Fin-to-base-plate area ratio: Afin/Abase where Abase = width × length
+        # TPMS: alpha * H (SAD × channel height); PlateFin: (2*Hf - tf) / sf
+        self.Afin_Abase = tpms_geometry.get('Afin_Abase_ratio', 0.0)
 
         if self.d_p <= 0:
             raise ValueError("particle_diameter must be > 0")
@@ -381,20 +384,43 @@ class PackedBedTPMSModel:
         h_w, Nu_w = self.wall_htc_dixon(Re_p, Pr, k_f, Nu_w0)
         k_r = self.effective_conductivity_dixon(k_f, Re_p, Pr)
 
-        d_i = self.D_h  # TPMS水力直径 → Dixon公式中管内径
+        d_i = self.D_h  # hydraulic diameter: for Bi, Nu_w, and R_bed conduction path
         Bi = h_w * d_i / (2.0 * k_r)
         R_w = 1.0 / h_w
         R_bed = (d_i / (6.0 * k_r)) * (Bi + 3.0) / (Bi + 4.0)
 
-        eta_fin = self.tpms_fin_efficiency(h_w)
-        if mode == 'lower':
-            area_factor = 1.0
-        elif mode == 'nominal':
-            area_factor = 1.0 + 0.2 * eta_fin
-        else:  # upper
-            area_factor = 1.0 + 0.4 * eta_fin
+        # Pure Dixon HTC referenced to Abase = width × length [W/m²·K]
+        h_pure = 1.0 / (R_w + R_bed)
 
-        h_i = area_factor / (R_w + R_bed)
+        # 使用单根翅片效率 η_f (非 η_h), 与 q=Abase*(1+Afin/Abase*η_f)*h*dt 一致
+        if self.fin_height_for_eff is not None:
+            # PlateFin: compute η_f directly (tpms_fin_efficiency returns η_h for PlateFin)
+            _m  = np.sqrt(2.0 * h_pure / max(self.k_wall * self.t_wall, 1e-30))
+            _mL = _m * self.fin_height_for_eff
+            if _mL < 0.01:
+                eta_fin = 1.0
+            elif _mL > 20.0:
+                eta_fin = 1.0 / _mL
+            else:
+                eta_fin = np.tanh(_mL) / _mL
+        else:
+            # TPMS: tpms_fin_efficiency returns η_f directly
+            eta_fin = self.tpms_fin_efficiency(h_pure)
+
+        # q = Abase * (1 + Afin/Abase * eta) * h_pure * dt
+        # h_i returned is the effective HTC still referenced to Abase so that
+        # the caller computes G = h_i * Abase_elem directly.
+        if mode == 'lower':
+            # conservative: no fin contribution
+            h_i = h_pure
+        elif mode == 'nominal':
+            # precise geometry-based fin area
+            h_i = h_pure * (1.0 + self.Afin_Abase * eta_fin)
+        else:  # upper
+            # optimistic: perfect fin efficiency (eta = 1)
+            h_i = h_pure * (1.0 + self.Afin_Abase * 1.0)
+
+        area_factor = h_i / max(h_pure, 1e-30)   # for traceability
 
         details = {
             'htc_model': 'dixon',
@@ -406,6 +432,8 @@ class PackedBedTPMSModel:
             'R_wall_film': R_w,
             'R_bed_conduction': R_bed,
             'R_total': R_w + R_bed,
+            'h_pure': h_pure,
+            'Afin_Abase': self.Afin_Abase,
             'eta_fin': eta_fin,
             'area_factor': area_factor,
             'h_eff': h_i,
@@ -467,24 +495,31 @@ class PackedBedTPMSModel:
         # 模式相关参数
         # TPMS增强体现在两个方面:
         # 1. C_shape: 几何因子 (TPMS缩短导热路径 → 更小的C, lower/nominal/upper: 8/6/4)
-        # 2. area_factor: 翅片面积增强 (TPMS壁面深入填充床 → 额外传热面积)
-        #    area_factor = 1 + f_fin * eta_fin  (f_fin: 0/0.2/0.4 for lower/nominal/upper)
-        #    Note: k_enhance dispersion multiplier removed; TPMS geometry effect
-        #    is captured by C_shape and accurate SAD from the Geometry Estimator.
+        # 2. 翅片面积增强: q = Abase*(1 + Afin/Abase*η_f)*h_pure*dt
+        #    η_f = tanh(mHf)/(mHf)  (单根翅片效率, 非整体面效率η_h)
+        #    Afin/Abase 由几何精确计算: PlateFin=(2Hf-tf)/sf, TPMS=SAD*H
 
-        eta_fin = self.tpms_fin_efficiency(h_w)
+        # 使用单根翅片效率 η_f (非 η_h=1-Af/Ah*(1-η_f))
+        if self.fin_height_for_eff is not None:
+            # PlateFin: compute η_f directly from fin geometry
+            _m   = np.sqrt(2.0 * h_w / max(self.k_wall * self.t_wall, 1e-30))
+            _mL  = _m * self.fin_height_for_eff
+            if _mL < 0.01:
+                eta_fin = 1.0
+            elif _mL > 20.0:
+                eta_fin = 1.0 / _mL
+            else:
+                eta_fin = np.tanh(_mL) / _mL
+        else:
+            # TPMS: tpms_fin_efficiency already returns η_f for TPMS
+            eta_fin = self.tpms_fin_efficiency(h_w)
 
         if mode == 'lower':
             C_shape = 8.0      # 圆管几何 (最长导热路径)
-            area_factor = 1.0  # 无翅片面积增益
         elif mode == 'nominal':
             C_shape = 6.0      # TPMS中间值
-            # 翅片增益: TPMS壁面提供约20%额外有效面积 (保守估计)
-            area_factor = 1.0 + 0.2 * eta_fin
         else:  # upper
             C_shape = 4.0      # 短导热路径
-            # 翅片增益: TPMS壁面提供约40%额外有效面积 (乐观估计)
-            area_factor = 1.0 + 0.4 * eta_fin
 
         k_r_adj = k_r_eff  # No k_enhance; TPMS flow redistribution captured via C_shape
 
@@ -493,18 +528,30 @@ class PackedBedTPMSModel:
         R_bed_cond = self.D_h / (C_shape * k_r_adj)
         R_total = R_wall_film + R_bed_cond
 
-        # 有效传热系数 = 面积增强 / 总热阻
-        h_eff = area_factor / R_total
+        # Pure HTC referenced to Abase = width × length [W/m²·K]
+        h_pure = 1.0 / R_total
+
+        # q = Abase * (1 + Afin/Abase * eta) * h_pure * dt
+        if mode == 'lower':
+            h_eff = h_pure                                      # conservative: no fin
+        elif mode == 'nominal':
+            h_eff = h_pure * (1.0 + self.Afin_Abase * eta_fin) # precise geometry
+        else:  # upper
+            h_eff = h_pure * (1.0 + self.Afin_Abase * 1.0)    # perfect fin efficiency
+
+        area_factor = h_eff / max(h_pure, 1e-30)   # for traceability
 
         details = {
             'h_w': h_w,
             'Nu_w': Nu_w,
             'k_eff_stagnant': self.effective_conductivity_stagnant(k_f),
             'k_r_eff': k_r_eff,
-            'k_r_adjusted': k_r_adj,  # equals k_r_eff (k_enhance removed)
+            'k_r_adjusted': k_r_adj,
             'R_wall_film': R_wall_film,
             'R_bed_conduction': R_bed_cond,
             'R_total': R_total,
+            'h_pure': h_pure,
+            'Afin_Abase': self.Afin_Abase,
             'eta_fin': eta_fin,
             'area_factor': area_factor,
             'C_shape': C_shape,
@@ -741,9 +788,11 @@ def create_packed_bed_model(config, stream_key='hot',
     }
 
     geo = config['geometry']
-    porosity_key = f'porosity_{stream_key}'
     porosity_default = 0.65 if stream_key == 'hot' else 0.70
-    porosity = config['geometry'].get(porosity_key, porosity_default)
+    # Prefer per-channel geometry porosity; fall back to legacy global keys
+    ch_geo_for_por = config.get('channels', {}).get(stream_key, {}).get('geometry', {}) or {}
+    porosity = (ch_geo_for_por.get('porosity')
+                or geo.get(f'porosity_{stream_key}', porosity_default))
 
     structure  = config.get('channels', {}).get(stream_key, {}).get('structure', '')
     ch_geo_raw = config.get('channels', {}).get(stream_key, {}).get('geometry', {}) or {}
@@ -755,10 +804,13 @@ def create_packed_bed_model(config, stream_key='hot',
         tf = ch_geo_raw.get('fin_thickness') or geo.get('fin_thickness', 0.6e-3)
         D_h       = 2.0 * (Hf - tf) * (sf - tf) / max(Hf + sf - 2.0 * tf, 1e-12)
         t_wall_eff = tf   # fin thickness acts as the fin wall thickness
-        fin_height_eff = Hf
+        # Symmetric fin model (cold-hot-cold-hot stacking):
+        # Each hot fin layer has a cold dividing plate on BOTH sides.
+        # By symmetry the effective fin half-height = Hf/2 (adiabatic midplane).
+        fin_height_eff = Hf / 2.0
         # Af/Ah ratio (no perforations by default)
-        n_d = geo.get('perf_density', 0.0)
-        r_p = geo.get('perf_radius',  0.0)
+        n_d = ch_geo_raw.get('perf_density', geo.get('perf_density', 0.0))
+        r_p = ch_geo_raw.get('perf_radius',  geo.get('perf_radius',  0.0))
         if n_d > 0 and r_p > 0:
             Af_base = (2 * Hf - tf) + (sf - tf)
             Ah_base = (2 * Hf - tf) + 2 * (sf - tf)
@@ -769,20 +821,30 @@ def create_packed_bed_model(config, stream_key='hot',
             Af_val = (2 * Hf - tf) + (sf - tf)
             Ah_val = (2 * Hf - tf) + 2 * (sf - tf)
             Af_Ah_ratio = Af_val / max(Ah_val, 1e-12)
+        # Afin/Abase: each dividing plate owns half the fin area (symmetric arrangement)
+        # Full perimeter per pitch = (2*Hf - tf); split equally between top and bottom plate
+        Afin_Abase_ratio = (2.0 * Hf - tf) / (2.0 * max(sf, 1e-12))
     else:
         # TPMS: existing formula
-        cell_size  = cell_size_override if cell_size_override is not None else geo['unit_cell_size']
+        _cell_default = ch_geo_raw.get('unit_cell_size') or geo.get('unit_cell_size', 5e-3)
+        _wall_default = ch_geo_raw.get('wall_thickness') or geo.get('wall_thickness', 5e-4)
+        cell_size  = cell_size_override if cell_size_override is not None else _cell_default
         D_h        = 4.0 * porosity * cell_size / (2.0 * np.pi)
-        t_wall_eff = t_wall_override if t_wall_override is not None else geo['wall_thickness']
+        t_wall_eff = t_wall_override if t_wall_override is not None else _wall_default
         fin_height_eff = None
         Af_Ah_ratio    = None
+        # Afin/Abase: SAD × channel height (TPMS ligaments act as fins on the base plate)
+        alpha = config.get('channels', {}).get(stream_key, {}).get('surface_area_density', 0.0)
+        H_ch  = float(ch_geo_raw.get('height') or geo.get('height', 0.25))
+        Afin_Abase_ratio = alpha * H_ch   # [1/m] × [m] = dimensionless
 
     tpms_geometry = {
-        'D_h':          D_h,
-        'wall_thickness': t_wall_eff,
-        'k_wall':       config['material']['k_wall'],
-        'fin_height':   fin_height_eff,   # None → TPMS logic; Hf → PlateFin logic
-        'Af_Ah_ratio':  Af_Ah_ratio,
+        'D_h':             D_h,
+        'wall_thickness':  t_wall_eff,
+        'k_wall':          config['material']['k_wall'],
+        'fin_height':      fin_height_eff,   # None -> TPMS logic; Hf/2 -> PlateFin symmetric
+        'Af_Ah_ratio':     Af_Ah_ratio,
+        'Afin_Abase_ratio': Afin_Abase_ratio,
     }
 
     return PackedBedTPMSModel(catalyst_config, tpms_geometry)

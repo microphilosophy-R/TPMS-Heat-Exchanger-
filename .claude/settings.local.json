@@ -44,7 +44,12 @@
       "Bash(\"C:\\\\大论文\\\\code\\\\TPMS_HE\\\\.venv\\\\Scripts\\\\pip.exe\" install pytest -q)",
       "Bash(\"C:\\\\大论文\\\\code\\\\TPMS_HE\\\\.venv\\\\Scripts\\\\python.exe\" -m pytest --version)",
       "Bash(\"C:/大论文/code/TPMS_HE/.venv/Scripts/pip.exe\" install:*)",
-      "Bash(\"C:/大论文/code/TPMS_HE/.venv/Scripts/python.exe\" -m pytest:*)"
+      "Bash(\"C:/大论文/code/TPMS_HE/.venv/Scripts/python.exe\" -m pytest:*)",
+      "Bash(\"C:\\\\大论文\\\\code\\\\TPMS_HE\\\\.venv\\\\Scripts\\\\pip.exe\" list)",
+      "Bash(.venvScriptspip install scikit-image)",
+      "Bash(\"C:\\\\大论文\\\\code\\\\TPMS_HE\\\\.venv\\\\Scripts\\\\python.exe\" -c:*)",
+      "Bash(\"C:\\\\大论文\\\\code\\\\TPMS_HE\\\\.venv\\\\Scripts\\\\python.exe\" -c \"import skimage; print\\(skimage.__version__\\)\")",
+      "Bash(pip show:*)"
     ],
     "additionalDirectories": [
       "c:\\大论文\\validation\\code"

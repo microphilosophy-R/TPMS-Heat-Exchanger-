@@ -49,7 +49,44 @@ def load_ui_state(path):
         return None, [f"Autosave load failed ({path}): {exc}"]
 
 
+def _migrate_legacy_state(state):
+    """Migrate old geometry schema (global porosity_hot/cold, etc.) to per-channel geometry."""
+    geo = state.get("geometry", {})
+    channels = state.get("channels", {})
+
+    _field_map = {
+        "hot":  {"porosity": geo.get("porosity_hot",  0.65)},
+        "cold": {"porosity": geo.get("porosity_cold", 0.70)},
+    }
+    _shared_fields = {
+        "unit_cell_size": geo.get("unit_cell_size",  5e-3),
+        "wall_thickness": geo.get("wall_thickness",  5e-4),
+        "height":         geo.get("height",          0.25),
+        "fin_height":     geo.get("fin_height",      9.5e-3),
+        "fin_spacing":    geo.get("fin_spacing",      3.2e-3),
+        "fin_thickness":  geo.get("fin_thickness",    0.6e-3),
+        "perf_density":   geo.get("perf_density",     0.0),
+        "perf_radius":    geo.get("perf_radius",      0.0),
+        "length":         geo.get("length",           0.94),
+        "width":          geo.get("width",            0.25),
+    }
+
+    for sk in ("hot", "cold"):
+        ch = channels.setdefault(sk, {})
+        ch_geo = ch.setdefault("geometry", {})
+        # Migrate shared fields
+        for field, default in _shared_fields.items():
+            if ch_geo.get(field) is None:
+                ch_geo[field] = default
+        # Migrate channel-specific porosity
+        if ch_geo.get("porosity") is None:
+            ch_geo["porosity"] = _field_map[sk]["porosity"]
+
+    return state
+
+
 def sanitize_ui_state(state, defaults):
+    state = _migrate_legacy_state(state)
     merged = _deep_merge(defaults, state)
     notices = []
     supported_tpms = set(ThermoHydraulicCorrelations.get_supported_tpms_types())

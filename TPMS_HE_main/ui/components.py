@@ -50,13 +50,11 @@ def render_summary_table(state, issues):
                 [
                     ("length [m]", state["geometry"]["length"]),
                     ("width [m]", state["geometry"]["width"]),
-                    ("height [m]", state["geometry"]["height"]),
-                    ("unit_cell_size [m]", state["geometry"]["unit_cell_size"]),
-                    ("wall_thickness [m]", state["geometry"]["wall_thickness"]),
-                    ("α_hot [1/m]", state["channels"]["hot"].get("surface_area_density", state["geometry"]["surface_area_density"])),
-                    ("α_cold [1/m]", state["channels"]["cold"].get("surface_area_density", state["geometry"]["surface_area_density"])),
-                    ("porosity_hot", state["geometry"]["porosity_hot"]),
-                    ("porosity_cold", state["geometry"]["porosity_cold"]),
+                    ("plate_thickness [m]", state["geometry"].get("plate_thickness", "—")),
+                    ("ε_hot [-]", state["channels"]["hot"].get("geometry", {}).get("porosity", "—")),
+                    ("ε_cold [-]", state["channels"]["cold"].get("geometry", {}).get("porosity", "—")),
+                    ("α_hot [1/m]", state["channels"]["hot"].get("surface_area_density", "—")),
+                    ("α_cold [1/m]", state["channels"]["cold"].get("surface_area_density", "—")),
                 ]
             )
         )

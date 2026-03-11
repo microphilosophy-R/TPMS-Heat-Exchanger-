@@ -60,22 +60,24 @@ class TPMSHeatExchanger:
         self.N = self.config['solver']['n_elements']
 
         def _ch_geo(sk):
-            """Return (L, W, H, Lc, tw, Hf, sf, tf) for channel sk, falling back to global geometry."""
+            """Return (L, W, H, Lc, tw, Hf, sf, tf, eps) for channel sk."""
             ch_geo = self.config['channels'][sk].get('geometry', {}) or {}
             g = self.config['geometry']
-            L  = ch_geo.get('length')         or g['length']
-            W  = ch_geo.get('width')          or g['width']
-            H  = ch_geo.get('height')         or g['height']
-            Lc = ch_geo.get('unit_cell_size') or g['unit_cell_size']
-            tw = ch_geo.get('wall_thickness') or g['wall_thickness']
-            # PlateFin fin geometry (falls back to global defaults)
-            Hf = ch_geo.get('fin_height')    or g.get('fin_height',    9.5e-3)
-            sf = ch_geo.get('fin_spacing')   or g.get('fin_spacing',   3.2e-3)
-            tf = ch_geo.get('fin_thickness') or g.get('fin_thickness', 0.6e-3)
-            return float(L), float(W), float(H), float(Lc), float(tw), float(Hf), float(sf), float(tf)
+            # length/width are always in per-channel geo (mirrored from shared global)
+            L  = ch_geo.get('length')  or g['length']
+            W  = ch_geo.get('width')   or g['width']
+            H  = ch_geo.get('height',  0.25)
+            Lc = ch_geo.get('unit_cell_size', 5e-3)
+            tw = ch_geo.get('wall_thickness', 5e-4)
+            Hf = ch_geo.get('fin_height',    9.5e-3)
+            sf = ch_geo.get('fin_spacing',   3.2e-3)
+            tf = ch_geo.get('fin_thickness', 0.6e-3)
+            eps = ch_geo.get('porosity', 0.65 if sk == 'hot' else 0.70)
+            return (float(L), float(W), float(H), float(Lc), float(tw),
+                    float(Hf), float(sf), float(tf), float(eps))
 
-        L_h, W_h, H_h, Lc_h, tw_h, Hf_h, sf_h, tf_h = _ch_geo('hot')
-        L_c, W_c, H_c, Lc_c, tw_c, Hf_c, sf_c, tf_c = _ch_geo('cold')
+        L_h, W_h, H_h, Lc_h, tw_h, Hf_h, sf_h, tf_h, eps_h = _ch_geo('hot')
+        L_c, W_c, H_c, Lc_c, tw_c, Hf_c, sf_c, tf_c, eps_c = _ch_geo('cold')
 
         # Per-channel surface area densities [1/m]
         alpha_h = self.config['channels']['hot']['surface_area_density']
@@ -95,13 +97,16 @@ class TPMSHeatExchanger:
         self.H             = H_h             # hot-channel cross-section height [m]
         self.wall_thickness   = tw_h     # hot-side TPMS skeleton thickness (legacy name)
         self.wall_thickness_c = tw_c     # cold-side TPMS skeleton thickness
-        self.plate_thickness  = float(self.config['geometry'].get(
-            'plate_thickness', self.config['geometry']['wall_thickness']))  # dividing plate
+        self.plate_thickness  = float(self.config['geometry'].get('plate_thickness', 1e-3))
         self.k_wall         = self.config['material']['k_wall']
+        # Dividing-plate elemental areas [m²] — Abase = width × length per element
+        # Used for packed-channel conductance and plate-conduction resistance
+        self.Abase_elem_h = W_h * L_h / self.N
+        self.Abase_elem_c = W_c * L_c / self.N
 
         # 3. Initialize Stream Constants (per-channel geometry applied)
-        por_h = self.config['geometry']['porosity_hot']
-        por_c = self.config['geometry']['porosity_cold']
+        por_h = eps_h
+        por_c = eps_c
         self.streams = {
             'hot': {
                 'species': self.config['operating'].get('fluid_hot', 'hydrogen mixture'),
@@ -159,8 +164,8 @@ class TPMSHeatExchanger:
                 self.streams[sk]['fin_thickness'] = tf
                 # Pre-compute Af/Ah ratio for fin efficiency (Eqs. 8–10, Wang et al. 2024)
                 # Without perforations (n=0): Af = (2Hf - tf + sf - tf), Ah = (2Hf - tf + 2*(sf - tf))
-                n_d = self.config['geometry'].get('perf_density', 0.0)
-                r_p = self.config['geometry'].get('perf_radius',  0.0)
+                n_d = self.config['channels'][sk]['geometry'].get('perf_density', 0.0)
+                r_p = self.config['channels'][sk]['geometry'].get('perf_radius',  0.0)
                 if n_d > 0 and r_p > 0:
                     # Per unit HE length, Af and Ah from Eqs. 8–9 (W/sf factor cancels in ratio)
                     Af_base = (2 * Hf - tf) + (sf - tf)
@@ -547,19 +552,28 @@ class TPMSHeatExchanger:
         mc = self.streams['cold']['m']
 
         # 1. Calculate Heat Load & UA (Elemental)
+        # For packed channels h_eff is referenced to Abase (= width × length per element)
+        # so that G = h_eff * Abase_elem correctly gives W/K = q/dt.
+        # For bare channels h_eff is referenced to total TPMS surface area A_elem.
+        _hot_packed  = (self.channel_closure_registry['hot']['mode']  == 'packed')
+        _cold_packed = (self.channel_closure_registry['cold']['mode'] == 'packed')
+        A_ref_h = self.Abase_elem_h if _hot_packed  else self.A_elem_h
+        A_ref_c = self.Abase_elem_c if _cold_packed else self.A_elem_c
+
         for i in range(self.N):
             # Per-element thermal conductances [W/K]
             h_hot  = max(self.elem_h['htc'][i], 1e-5)
             h_cold = max(self.elem_c['htc'][i], 1e-5)
 
-            G_hot  = h_hot  * self.A_elem_h                         # hot-side conductance [W/K]
-            G_cold = h_cold * self.A_elem_c                         # cold-side conductance [W/K]
-            G_wall = self.k_wall * self.A_elem_h / max(self.plate_thickness, 1e-9)  # dividing plate conduction [W/K]
+            G_hot  = h_hot  * A_ref_h   # hot-side conductance [W/K]
+            G_cold = h_cold * A_ref_c   # cold-side conductance [W/K]
+            # Dividing-plate conduction uses actual plate area (Abase_elem_h) [W/K]
+            G_wall = self.k_wall * self.Abase_elem_h / max(self.plate_thickness, 1e-9)
 
             # Total conductance UA [W/K] — reference-area-independent
             UA_elem = 1.0 / (1.0/G_hot + 1.0/G_wall + 1.0/G_cold)
-            # Store U referenced to hot-side area for output compatibility
-            self.U[i] = UA_elem / self.A_elem_h
+            # Store U referenced to hot-side reference area for output compatibility
+            self.U[i] = UA_elem / A_ref_h
 
             # --- Thermal resistance breakdown [K/W] ---
             R_hot_total  = 1.0 / G_hot
@@ -785,9 +799,15 @@ class TPMSHeatExchanger:
         try:
             h_hot_mean  = max(np.mean(self.elem_h['htc']), 1e-9)
             h_cold_mean = max(np.mean(self.elem_c['htc']), 1e-9)
-            G_hot_elem  = h_hot_mean  * self.A_elem_h
-            G_cold_elem = h_cold_mean * self.A_elem_c
-            G_wall_elem = self.k_wall * self.A_elem_h / max(self.plate_thickness, 1e-9)
+            # Use the same reference area as _compute_energy_balance:
+            # packed channels → h is referenced to Abase (W×L/N), not TPMS surface area
+            _hot_packed_est  = (self.channel_closure_registry['hot']['mode']  == 'packed')
+            _cold_packed_est = (self.channel_closure_registry['cold']['mode'] == 'packed')
+            _A_ref_h_est = self.Abase_elem_h if _hot_packed_est  else self.A_elem_h
+            _A_ref_c_est = self.Abase_elem_c if _cold_packed_est else self.A_elem_c
+            G_hot_elem  = h_hot_mean  * _A_ref_h_est
+            G_cold_elem = h_cold_mean * _A_ref_c_est
+            G_wall_elem = self.k_wall * self.Abase_elem_h / max(self.plate_thickness, 1e-9)
             UA_elem_est = 1.0 / (1.0 / max(G_hot_elem, 1e-30) +
                                  1.0 / max(G_wall_elem, 1e-30) +
                                  1.0 / max(G_cold_elem, 1e-30))

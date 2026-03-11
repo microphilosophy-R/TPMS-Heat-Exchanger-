@@ -27,10 +27,12 @@ def validate_ui_state(state):
     output = state["output"]
     channels = state["channels"]
 
-    for key in ("length", "width", "height", "unit_cell_size", "wall_thickness"):
+    for key in ("length", "width"):
         if geo[key] <= 0:
             _add_issue(issues, "error", "geometry", key, f"{key} must be > 0.")
-    if geo["surface_area_density"] <= 0:
+    # surface_area_density is per-channel; global key may not exist
+    global_sad = geo.get("surface_area_density")
+    if global_sad is not None and global_sad <= 0:
         _add_issue(
             issues,
             "error",
@@ -38,24 +40,25 @@ def validate_ui_state(state):
             "surface_area_density",
             "surface_area_density must be > 0.",
         )
-    for key in ("porosity_hot", "porosity_cold"):
-        if not (0.05 <= geo[key] <= 0.95):
+    for ch in ("hot", "cold"):
+        ch_geo = channels[ch].get("geometry", {}) or {}
+        eps = ch_geo.get("porosity")
+        if eps is not None and not (0.05 <= eps <= 0.95):
             _add_issue(
                 issues,
                 "error",
                 "geometry",
-                key,
-                f"{key} must be within [0.05, 0.95].",
+                f"porosity_{ch}",
+                f"{ch} porosity must be within [0.05, 0.95].",
             )
-    # Per-channel geometry overrides (only when identical_channels is OFF)
-    if not geo.get("identical_channels", True):
-        for ch in ("hot", "cold"):
-            ch_geo = channels[ch].get("geometry", {}) or {}
-            for dim in ("length", "width", "height", "unit_cell_size", "wall_thickness"):
-                val = ch_geo.get(dim)
-                if val is not None and val <= 0:
-                    _add_issue(issues, "error", "geometry",
-                               f"{ch}_{dim}", f"{ch} {dim} must be > 0.")
+    # Per-channel geometry validation
+    for ch in ("hot", "cold"):
+        ch_geo = channels[ch].get("geometry", {}) or {}
+        for dim in ("height", "unit_cell_size", "wall_thickness"):
+            val = ch_geo.get(dim)
+            if val is not None and val <= 0:
+                _add_issue(issues, "error", "geometry",
+                           f"{ch}_{dim}", f"{ch} {dim} must be > 0.")
     # Dividing plate thickness
     pt = geo.get("plate_thickness")
     if pt is not None and pt <= 0:

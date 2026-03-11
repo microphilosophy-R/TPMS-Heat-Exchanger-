@@ -5,11 +5,14 @@
         "fin_height": 0.0095,
         "fin_spacing": 0.0032,
         "fin_thickness": 0.0006,
-        "height": null,
-        "length": null,
-        "unit_cell_size": null,
-        "wall_thickness": null,
-        "width": null
+        "height": 0.25,
+        "length": 4.2,
+        "perf_density": 0.0,
+        "perf_radius": 0.0,
+        "porosity": 0.7,
+        "unit_cell_size": 0.005,
+        "wall_thickness": 0.0005,
+        "width": 0.25
       },
       "mode": "bare",
       "packed": {
@@ -20,19 +23,22 @@
         "particle_diameter": 0.001,
         "shape_factor": 1.0
       },
-      "structure": "PlateFin",
-      "surface_area_density": 776.3157894736842
+      "structure": "Diamond",
+      "surface_area_density": 712.8526430956169
     },
     "hot": {
       "geometry": {
         "fin_height": 0.0095,
         "fin_spacing": 0.0032,
         "fin_thickness": 0.0006,
-        "height": null,
-        "length": null,
-        "unit_cell_size": null,
-        "wall_thickness": null,
-        "width": null
+        "height": 0.25,
+        "length": 4.2,
+        "perf_density": 0.0,
+        "perf_radius": 0.0,
+        "porosity": 0.6,
+        "unit_cell_size": 0.005,
+        "wall_thickness": 0.02,
+        "width": 0.25
       },
       "mode": "packed",
       "packed": {
@@ -43,30 +49,23 @@
         "particle_diameter": 0.001,
         "shape_factor": 1.0
       },
-      "structure": "PlateFin",
-      "surface_area_density": 776.3157894736842
+      "structure": "Neovius",
+      "surface_area_density": 671.7935095518753
     }
   },
   "geometry": {
-    "fin_height": 0.0095,
-    "fin_spacing": 0.0032,
-    "fin_thickness": 0.0006,
-    "height": 0.25,
-    "identical_channels": true,
     "length": 4.2,
-    "perf_density": 0.0,
-    "perf_radius": 0.0,
     "plate_thickness": 0.001,
-    "porosity_cold": 0.7,
-    "porosity_hot": 0.32,
-    "surface_area_density": 776.3157894736842,
-    "unit_cell_size": 0.005,
-    "wall_thickness": 0.0005,
+    "surface_area_density": 712.8526430956169,
     "width": 0.25
+  },
+  "material": {
+    "k_wall": 237.0
   },
   "operating": {
     "Pc_in": 1500000.0,
     "Ph_in": 2000000.0,
+    "T_ambient": 298.0,
     "Tc_in": 43.0,
     "Th_in": 78.0,
     "fluid_cold": "helium",

@@ -1,62 +1,13 @@
 """ui.step_channels -- Step 1 (channels sub-section): channel card rendering."""
 
 import streamlit as st
-import numpy as np
 
-from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelations
 from models.packed_bed import SUPPORTED_PACKED_MODES
 from ui.components import _k
-from ui.step_geometry import _render_channel_estimator
+from ui.step_geometry import _eval_tpms_normalized, _render_tpms_thumbnail
 
 
-def _render_derived_channel_metrics(state, channel_name, channel_state):
-    """Display read-only derived geometry metrics for one channel."""
-    sk = channel_name.lower()
-    geo = state["geometry"]
-    ch_geo = channel_state.get("geometry", {}) or {}
-
-    ch_L = float(ch_geo.get("length")  or geo["length"])
-    ch_W = float(ch_geo.get("width")   or geo["width"])
-    ch_H = float(ch_geo.get("height")  or geo["height"])
-    L_cell = float(ch_geo.get("unit_cell_size") or geo["unit_cell_size"])
-    struct = channel_state["structure"]
-
-    if struct == "PlateFin":
-        Hf = float(ch_geo.get("fin_height")    or geo.get("fin_height",    9.5e-3))
-        sf = float(ch_geo.get("fin_spacing")   or geo.get("fin_spacing",   3.2e-3))
-        tf = float(ch_geo.get("fin_thickness") or geo.get("fin_thickness", 0.6e-3))
-        eps = (sf - tf) / max(sf, 1e-12)
-        Dh  = 2.0 * (Hf - tf) * (sf - tf) / max(Hf + sf - 2.0 * tf, 1e-12)
-    elif struct == "SmoothPlateFin":
-        eps = float(geo.get(f"porosity_{sk}", 0.5))
-        Dh  = 4.0 * ch_W * ch_H * eps / max(2.0 * (ch_W + ch_H * eps), 1e-12)
-    else:
-        eps = float(geo.get(f"porosity_{sk}", 0.5))
-        a   = L_cell / (2.0 * np.pi)
-        Dh  = 4.0 * eps * a
-
-    V_total = ch_L * ch_W * ch_H
-    V_f     = eps * V_total
-    V_s     = (1.0 - eps) * V_total
-    SAD     = float(channel_state.get("surface_area_density", 0.0))
-    A_HX    = SAD * V_total
-
-    is_packed = channel_state.get("mode") == "packed"
-    n_cols = 7 if is_packed else 5
-    st.markdown("**Derived Channel Geometry**")
-    cols = st.columns(n_cols)
-    cols[0].metric("Dh [mm]",      f"{Dh * 1e3:.3f}")
-    cols[1].metric("ε [-]",        f"{eps:.3f}")
-    cols[2].metric("A_HX [m²]",    f"{A_HX:.4f}")
-    cols[3].metric("V_fluid [L]",  f"{V_f * 1e3:.4f}")
-    cols[4].metric("V_solid [L]",  f"{V_s * 1e3:.4f}")
-    if is_packed:
-        packed = channel_state.get("packed", {})
-        dp_mm  = float(packed.get("particle_diameter", 0.0)) * 1e3
-        eps_bed = float(packed.get("bed_porosity", 0.0))
-        cols[5].metric("d_p [mm]",   f"{dp_mm:.3f}")
-        cols[6].metric("ε_bed [-]",  f"{eps_bed:.3f}")
-
+# ── Equation renderers ────────────────────────────────────────────────────────
 
 def _render_htc_model_equations(htc_model: str):
     """Show governing equations for the selected packed-bed HTC model."""
@@ -233,8 +184,14 @@ def _render_ergun_equations():
         )
 
 
+# ── Channel card ──────────────────────────────────────────────────────────────
+
 def render_channel_card(channel_name, channel_state, state):
-    st.markdown(f"#### {channel_name.capitalize()} Channel")
+    color_icon = "🔴" if channel_name == "hot" else "🔵"
+    st.markdown(f"#### {color_icon} {channel_name.capitalize()} Channel")
+
+    # ── ⚙️ Flow Mode ──────────────────────────────────────────────────────────
+    st.markdown("**⚙️ Flow Mode**")
     mode_options = ["bare", "packed"]
     mode_idx = mode_options.index(channel_state["mode"]) if channel_state["mode"] in mode_options else 0
     channel_state["mode"] = st.selectbox(
@@ -242,62 +199,44 @@ def render_channel_card(channel_name, channel_state, state):
         options=mode_options,
         index=mode_idx,
         key=_k(f"{channel_name}_mode"),
-    )
-    structures = list(ThermoHydraulicCorrelations.get_supported_tpms_types())
-    structure_idx = structures.index(channel_state["structure"]) if channel_state["structure"] in structures else 0
-    channel_state["structure"] = st.selectbox(
-        f"{channel_name} TPMS structure",
-        options=structures,
-        index=structure_idx,
-        key=_k(f"{channel_name}_structure"),
+        help="bare = open TPMS lattice (no catalyst); packed = packed catalyst bed inside TPMS.",
     )
 
-    # --- PlateFin fin geometry (per-channel) ---
-    if channel_state["structure"] == "PlateFin":
-        ch_geo = channel_state.setdefault("geometry", {})
-        g = state["geometry"]   # global fallbacks
-        pf1, pf2, pf3 = st.columns(3)
-        ch_geo["fin_height"] = pf1.number_input(
-            f"{channel_name} fin height Hf [m]", min_value=1e-4,
-            value=float(ch_geo.get("fin_height") or g.get("fin_height", 9.5e-3)),
-            format="%.5f", key=_k(f"{channel_name}_fin_H"),
-            help="Distance between plates (fin height). Determines Dh and fin efficiency.",
-        )
-        ch_geo["fin_spacing"] = pf2.number_input(
-            f"{channel_name} fin spacing sf [m]", min_value=1e-5,
-            value=float(ch_geo.get("fin_spacing") or g.get("fin_spacing", 3.2e-3)),
-            format="%.5f", key=_k(f"{channel_name}_fin_s"),
-            help="Centre-to-centre fin pitch. Porosity ε = (sf−tf)/sf.",
-        )
-        ch_geo["fin_thickness"] = pf3.number_input(
-            f"{channel_name} fin thickness tf [m]", min_value=1e-6,
-            value=float(ch_geo.get("fin_thickness") or g.get("fin_thickness", 0.6e-3)),
-            format="%.6f", key=_k(f"{channel_name}_fin_t"),
-            help="Fin wall thickness. Used in Dh (Eq. 2) and fin efficiency (Eqs. 11–12).",
-        )
+    # Show current structure as info (set in geometry step)
+    struct = channel_state.get("structure", "")
+    if struct:
+        st.caption(f"🔷 Structure: **{struct}** — configured in Geometry step above.")
+        _render_tpms_thumbnail(struct)
 
+    st.divider()
+
+    # ── 📏 Surface Area Density ───────────────────────────────────────────────
+    st.markdown("**📏 Surface Area Density**")
+    st.caption("α is auto-computed by the Geometry Estimator (Geometry step). "
+               "You may override it here if needed.")
     channel_state["surface_area_density"] = st.number_input(
-        f"{channel_name} surface area density α [1/m]",
+        f"{channel_name} α [1/m]",
         min_value=1.0,
         value=float(channel_state.get("surface_area_density", 60.0)),
-        help="Specific wetted area of this channel's TPMS structure. "
-             "Use the Geometry Estimator in Step 1 to estimate this value.",
+        help="Specific wetted surface area of this channel. Auto-populated from the Geometry Estimator.",
         key=_k(f"{channel_name}_sad"),
     )
     if channel_state["surface_area_density"] > 200:
         st.warning(
-            f"**High SAD detected ({channel_state['surface_area_density']:.0f} 1/m).** "
-            "A very large surface area density produces a stiff solver (high NTU), which "
-            "can cause the heat-flux residual (dQ) to oscillate and prevent convergence. "
-            "The solver will auto-reduce Q_damping, but if convergence fails you can also "
-            "manually lower **relax_thermal** (< 0.10) and **Q_damping** (< 0.1) in the "
-            "Solver Settings panel."
+            f"⚠️ **High SAD ({channel_state['surface_area_density']:.0f} 1/m).** "
+            "May cause stiff solver (high NTU). If convergence fails, lower "
+            "**relax_thermal** (< 0.10) and **Q_damping** (< 0.1) in Solver Settings."
         )
 
+    st.divider()
+
+    # ── 📖 Heat Transfer Correlations ─────────────────────────────────────────
     if channel_state["mode"] == "bare":
+        st.markdown("**📖 Heat Transfer Correlations**")
         _render_tpms_bare_equations(channel_state["structure"])
 
     if channel_state["mode"] == "packed":
+        st.markdown("**📦 Packed-Bed Parameters**")
         packed = channel_state["packed"]
         mode_idx = list(SUPPORTED_PACKED_MODES).index(packed["mode"]) if packed["mode"] in SUPPORTED_PACKED_MODES else 1
         packed["mode"] = st.selectbox(
@@ -317,14 +256,15 @@ def render_channel_card(channel_name, channel_state, state):
         )
         _render_htc_model_equations(packed["htc_model"])
         _render_ergun_equations()
-        packed["particle_diameter"] = st.number_input(
+        pk1, pk2 = st.columns(2)
+        packed["particle_diameter"] = pk1.number_input(
             f"{channel_name} particle diameter [m]",
             min_value=1e-6,
             value=float(packed["particle_diameter"]),
             format="%.6f",
             key=_k(f"{channel_name}_dp"),
         )
-        packed["bed_porosity"] = st.slider(
+        packed["bed_porosity"] = pk2.slider(
             f"{channel_name} bed porosity [-]",
             min_value=0.05,
             max_value=0.95,
@@ -332,14 +272,15 @@ def render_channel_card(channel_name, channel_state, state):
             step=0.01,
             key=_k(f"{channel_name}_bed_por"),
         )
-        packed["k_solid"] = st.number_input(
-            f"{channel_name} solid conductivity [W/m-K]",
+        pk3, pk4 = st.columns(2)
+        packed["k_solid"] = pk3.number_input(
+            f"{channel_name} solid conductivity [W/m·K]",
             min_value=0.01,
             value=float(packed["k_solid"]),
             format="%.3f",
             key=_k(f"{channel_name}_ks"),
         )
-        packed["shape_factor"] = st.slider(
+        packed["shape_factor"] = pk4.slider(
             f"{channel_name} shape factor [-]",
             min_value=0.01,
             max_value=5.0,
@@ -349,16 +290,12 @@ def render_channel_card(channel_name, channel_state, state):
         )
 
     st.divider()
-    _render_derived_channel_metrics(state, channel_name, channel_state)
-    _render_channel_estimator(state, channel_name)
 
 
 def render_step_channels(state):
-    st.subheader("Channel Modeling")
+    st.subheader("⚙️ Channel Modeling")
     c1, c2 = st.columns(2)
     with c1:
         render_channel_card("hot", state["channels"]["hot"], state)
     with c2:
         render_channel_card("cold", state["channels"]["cold"], state)
-
-

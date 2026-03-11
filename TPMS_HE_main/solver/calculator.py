@@ -471,6 +471,7 @@ class TPMSHeatExchanger:
                 if s.get('tpms') == 'PlateFin':
                     _ctx['fin_height']    = s.get('fin_height',    9.5e-3)
                     _ctx['fin_thickness'] = s.get('fin_thickness', 0.6e-3)
+                    _ctx['fin_spacing']   = s.get('fin_spacing',   3.2e-3)
                     _ctx['Af_Ah_ratio']   = s.get('Af_Ah_ratio',  0.5)
                 Nu, f, htc, details = self.get_channel_closure(
                     stream_key=stream_key,

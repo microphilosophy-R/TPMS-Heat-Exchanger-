@@ -28,22 +28,23 @@ class ThermoHydraulicCorrelations:
     PR_RP3 = 20.0
     
     @staticmethod
-    def get_correlations(tpms_type, Re, Pr, fluid_type='Gas'):
+    def get_correlations(tpms_type, Re, Pr, fluid_type='Gas', geometry=None):
         """
         Get Nusselt number and friction factor for TPMS structure
-        
+
         Parameters
         ----------
         tpms_type : str
-            TPMS structure type: 'Gyroid', 'Diamond', 'Primitive', 
-            'Neovius', 'FRD', 'FKS'
+            TPMS structure type
         Re : float or ndarray
             Reynolds number [-]
         Pr : float or ndarray
             Prandtl number [-]
         fluid_type : str, optional
             Fluid type: 'Water', 'Air', 'Gas', 'RP-3'
-        
+        geometry : dict, optional
+            Geometry parameters for PlateFin (fin_spacing, fin_height, fin_thickness)
+
         Returns
         -------
         Nu : float or ndarray
@@ -83,7 +84,10 @@ class ThermoHydraulicCorrelations:
             tpms_type = 'Gyroid'
         
         # Get correlations
-        Nu, f = correlation_map[tpms_type](Re, Pr, fluid_type)
+        if tpms_type == 'PlateFin':
+            Nu, f = correlation_map[tpms_type](Re, Pr, fluid_type, geometry)
+        else:
+            Nu, f = correlation_map[tpms_type](Re, Pr, fluid_type)
         
         # Ensure physical values
         Nu = np.maximum(Nu, 1.0)  # Minimum Nu = 1
@@ -327,37 +331,30 @@ class ThermoHydraulicCorrelations:
 
 
     @staticmethod
-    def _plate_fin_correlations(Re, Pr, fluid_type):
+    def _plate_fin_correlations(Re, Pr, fluid_type, geometry=None):
         """
-        Perforated plate-fin (CPFHX) correlations — Wang et al. (2024) / Li (2018).
+        Plate-fin correlations with geometry-dependent option.
 
-        Colburn j-factor for cold-side perforated fins (Eq. 3 in Wang et al. 2024):
-            ln(j) = -2.64136e-2*(ln Re)^3 + 0.55584*(ln Re)^2 - 4.09241*ln(Re) + 6.21681
-            Nu    = j * Re * Pr^(1/3)
+        If geometry provided: Uses MATLAB-style correlation (Wang et al. 2024)
+            Nu = (0.233*Re^(-0.48)*(s/h)^0.192*(t/h)^(-0.14)) * Re * Pr^(1/3)
+            f  = 0.029*Re^(-0.09)*(s/h)^(-0.169)*(t/h)^0.034
 
-        Friction factor: empirical approximation for perforated plate fins.
-            f ≈ 2.5 * j
-        No explicit f correlation is reported in Wang et al. (2024); this factor is an
-        engineering estimate consistent with compact perforated-fin literature.
-
-        Note: fin efficiency correction (Eqs. 10–12, Wang et al. 2024) is applied
-        separately in the solver's get_channel_closure method using the channel geometry.
-
-        References
-        ----------
-        Wang et al. (2024), Int. J. Hydrogen Energy 110, 814-825.
-        Li (2018), Doctoral thesis, South China University of Technology.
+        Otherwise: Uses j-factor correlation (Li 2018)
         """
         Re_safe = np.maximum(Re, 1.0)
-        ln_Re = np.log(Re_safe)
-        # Eq. 3 — cubic coefficient is NEGATIVE
-        ln_j = (-2.64136e-2 * ln_Re**3
-                + 0.55584   * ln_Re**2
-                - 4.09241   * ln_Re
-                + 6.21681)
-        j  = np.exp(ln_j)
-        Nu = j * Re_safe * Pr**(1.0 / 3.0)
-        f  = 2.5 * j
+
+        if geometry and 'fin_spacing' in geometry:
+            s = geometry['fin_spacing']
+            h = geometry['fin_height']
+            t = geometry['fin_thickness']
+            Nu = (0.233 * Re_safe**(-0.48) * (s/h)**0.192 * (t/h)**(-0.14)) * Re_safe * Pr**(1/3)
+            f = 0.029 * Re_safe**(-0.09) * (s/h)**(-0.169) * (t/h)**0.034
+        else:
+            ln_Re = np.log(Re_safe)
+            ln_j = (-2.64136e-2 * ln_Re**3 + 0.55584 * ln_Re**2 - 4.09241 * ln_Re + 6.21681)
+            j = np.exp(ln_j)
+            Nu = j * Re_safe * Pr**(1/3)
+            f = 2.5 * j
         return Nu, f
 
 

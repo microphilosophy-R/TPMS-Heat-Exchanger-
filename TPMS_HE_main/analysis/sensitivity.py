@@ -17,12 +17,13 @@ Metrics:
         (subscript 0 = SmoothPlateFin at same Re)
 
 All analyses are correlation-level only (no full system solver).
-Run from TPMS_HE_main/:  python sensitivity_vs_baseline.py
+Run from TPMS_HE_main/:  python -m analysis.sensitivity
 """
 
 import os
 import sys
 import warnings
+from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
@@ -31,7 +32,8 @@ import pandas as pd
 # Suppress range-extrapolation warnings from the correlations module
 warnings.filterwarnings("ignore")
 
-from tpms_correlations import TPMSCorrelations
+from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelations
+from solver.config import make_run_dir
 
 # ---------------------------------------------------------------------------
 # Global constants
@@ -90,7 +92,7 @@ def _compute_jf(Re_arr):
     Re_arr = np.atleast_1d(np.asarray(Re_arr, dtype=float))
     Nu_d, f_d, j_d = {}, {}, {}
     for tpms in ALL_TYPES:
-        Nu, f = TPMSCorrelations.get_correlations(tpms, Re_arr, PR, 'Gas')
+        Nu, f = ThermoHydraulicCorrelations.get_correlations(tpms, Re_arr, PR, 'Gas')
         Nu = np.atleast_1d(np.nan_to_num(np.asarray(Nu, dtype=float), nan=np.nan))
         f  = np.atleast_1d(np.nan_to_num(np.asarray(f,  dtype=float), nan=np.nan))
         j  = Nu / (Re_arr * PR ** (1.0 / 3.0))
@@ -453,11 +455,12 @@ def summary_table():
 # Main
 # ===========================================================================
 def main():
-    out = 'results_sensitivity'
-    os.makedirs(out, exist_ok=True)
+    run_name = f"sensitivity_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    out = make_run_dir(run_name)
 
     print('=' * 65)
     print('TPMS Sensitivity Analysis vs. Smooth Plate-Fin Baseline')
+    print(f'Run: {run_name}')
     print('=' * 65)
 
     print('\n--- Study 1: PEC, j, f  vs. Reynolds Number ---')
@@ -475,7 +478,7 @@ def main():
     print('\n--- Summary Table ---')
     summary_table()
 
-    print(f'\nAll outputs saved to: {os.path.abspath(out)}/')
+    print(f'\nAll outputs saved to: {out}/')
     print('=' * 65)
 
 

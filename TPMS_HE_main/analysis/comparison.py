@@ -3,7 +3,7 @@
 Bare TPMS vs Packed-Bed TPMS Heat Transfer Comparison
 
 本脚本对比两种传热模型:
-1. 空通道TPMS (现有 tpms_correlations.py)
+1. 空通道TPMS (现有 thermohydraulic_correlations.py)
 2. 填充催化剂的TPMS (packed_bed_model.py)
 
 输出:
@@ -16,14 +16,16 @@ Bare TPMS vs Packed-Bed TPMS Heat Transfer Comparison
 用于第四章: 论证填充床对TPMS换热器性能的定量影响。
 """
 
+from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 import os
 import sys
 
-from tpms_correlations import TPMSCorrelations
-from packed_bed_model import PackedBedTPMSModel
+from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelations
+from models.packed_bed import PackedBedTPMSModel
+from solver.config import make_run_dir
 
 
 # ====================================================================
@@ -96,7 +98,7 @@ def compare_htc_vs_re(tpms_type='Diamond', output_dir='results'):
 
     for i, Re in enumerate(Re_range):
         # 空TPMS
-        Nu, f_val = TPMSCorrelations.get_correlations(tpms_type, Re, Pr, 'Gas')
+        Nu, f_val = ThermoHydraulicCorrelations.get_correlations(tpms_type, Re, Pr, 'Gas')
         h_bare[i] = Nu * k_f / D_h
         f_bare[i] = f_val
 
@@ -213,11 +215,11 @@ def compare_overall_U(tpms_type='Diamond', output_dir='results'):
 
     for i, Re in enumerate(Re_range):
         # 冷侧始终用空TPMS
-        Nu_cold, _ = TPMSCorrelations.get_correlations('Gyroid', Re * 0.8, Pr_cold, 'Gas')
+        Nu_cold, _ = ThermoHydraulicCorrelations.get_correlations('Gyroid', Re * 0.8, Pr_cold, 'Gas')
         h_cold = Nu_cold * k_f_cold / D_h_cold
 
         # 热侧: 空TPMS
-        Nu_hot_bare, _ = TPMSCorrelations.get_correlations(tpms_type, Re, Pr_hot, 'Gas')
+        Nu_hot_bare, _ = ThermoHydraulicCorrelations.get_correlations(tpms_type, Re, Pr_hot, 'Gas')
         h_hot_bare = Nu_hot_bare * k_f_hot / D_h_hot
 
         R_wall = t_wall / k_wall
@@ -460,7 +462,7 @@ def compare_tpms_types(output_dir='results'):
     rows = []
     for tpms in tpms_types:
         # 空TPMS
-        Nu_b, f_b = TPMSCorrelations.get_correlations(tpms, Re_channel, Pr, 'Gas')
+        Nu_b, f_b = ThermoHydraulicCorrelations.get_correlations(tpms, Re_channel, Pr, 'Gas')
         h_b = Nu_b * k_f / D_h
 
         # 填充TPMS
@@ -494,10 +496,12 @@ def compare_tpms_types(output_dir='results'):
 # ====================================================================
 
 def main():
-    output_dir = setup_output_dir('results_packed_vs_bare')
+    run_name = f"packed_vs_bare_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    output_dir = make_run_dir(run_name)
 
     print("=" * 70)
     print("Packed Bed + TPMS: Comprehensive Comparison Analysis")
+    print(f"Run: {run_name}")
     print("=" * 70)
 
     # 1. h_eff & f 对比
@@ -521,7 +525,7 @@ def main():
     compare_tpms_types(output_dir=output_dir)
 
     print("\n" + "=" * 70)
-    print(f"All results saved to: {os.path.abspath(output_dir)}/")
+    print(f"All results saved to: {output_dir}/")
     print("=" * 70)
 
 

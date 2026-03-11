@@ -23,12 +23,11 @@ import matplotlib.pyplot as plt
 
 # Import dependencies
 try:
-    from tpms_thermo_hydraulic_calculator import TPMSHeatExchanger
-    from tpms_visualization import TPMSVisualization
+    from solver.calculator import TPMSHeatExchanger
+    from visualization.plotter import TPMSVisualizer as TPMSVisualization
 except ImportError:
-    # Fallback if visualization isn't in path, though it's expected in the repo
     TPMSVisualization = None
-    print("Warning: Ensure 'tpms_thermo_hydraulic_calculator.py' and 'tpms_visualization.py' are present.")
+    print("Warning: Ensure solver/ and visualization/ packages are on the Python path.")
 
 class DummyFile:
     """A robust dummy file handler to suppress terminal output during heavy iterations."""
@@ -254,7 +253,7 @@ class TPMSDesigner:
             plt.show()
 
 if __name__ == "__main__":
-    from tpms_thermo_hydraulic_calculator import create_default_config
+    from solver.config import create_default_config
     config = create_default_config()
 
     designer = TPMSDesigner(config)

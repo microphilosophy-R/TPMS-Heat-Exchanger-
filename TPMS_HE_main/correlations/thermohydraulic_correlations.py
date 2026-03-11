@@ -13,7 +13,7 @@ import numpy as np
 import warnings
 
 
-class TPMSCorrelations:
+class ThermoHydraulicCorrelations:
     """
     Database of heat transfer and friction correlations for TPMS structures
     """
@@ -68,14 +68,14 @@ class TPMSCorrelations:
         
         # Select correlation function based on TPMS type
         correlation_map = {
-            'Gyroid': TPMSCorrelations._gyroid_correlations,
-            'Diamond': TPMSCorrelations._diamond_correlations,
-            'Primitive': TPMSCorrelations._primitive_correlations,
-            'Neovius': TPMSCorrelations._neovius_correlations,
-            'FRD': TPMSCorrelations._frd_correlations,
-            'FKS': TPMSCorrelations._fks_correlations,
-            'SmoothPlateFin': TPMSCorrelations._smooth_plate_fin_correlations,
-            'PlateFin': TPMSCorrelations._plate_fin_correlations,
+            'Gyroid': ThermoHydraulicCorrelations._gyroid_correlations,
+            'Diamond': ThermoHydraulicCorrelations._diamond_correlations,
+            'Primitive': ThermoHydraulicCorrelations._primitive_correlations,
+            'Neovius': ThermoHydraulicCorrelations._neovius_correlations,
+            'FRD': ThermoHydraulicCorrelations._frd_correlations,
+            'FKS': ThermoHydraulicCorrelations._fks_correlations,
+            'SmoothPlateFin': ThermoHydraulicCorrelations._smooth_plate_fin_correlations,
+            'PlateFin': ThermoHydraulicCorrelations._plate_fin_correlations,
         }
 
         if tpms_type not in correlation_map:
@@ -99,7 +99,7 @@ class TPMSCorrelations:
     @staticmethod
     def get_supported_tpms_types():
         """Return supported TPMS structure names."""
-        return TPMSCorrelations.SUPPORTED_TPMS_TYPES
+        return ThermoHydraulicCorrelations.SUPPORTED_TPMS_TYPES
     
     @staticmethod
     def _gyroid_correlations(Re, Pr, fluid_type):
@@ -379,7 +379,7 @@ def test_tpms_correlations():
     
     tpms_types = ['Gyroid', 'Diamond', 'Primitive', 'FKS']
     for tpms in tpms_types:
-        Nu, f = TPMSCorrelations.get_correlations(tpms, Re_test, Pr_test, 'Gas')
+        Nu, f = ThermoHydraulicCorrelations.get_correlations(tpms, Re_test, Pr_test, 'Gas')
         pec = Nu / f**(1/3)
         print(f"{tpms:<15} {Nu:8.2f} {f:10.4f} {pec:12.2f}")
     
@@ -390,7 +390,7 @@ def test_tpms_correlations():
     print()
     
     Re_range = np.array([100, 500, 1000, 2000, 5000])
-    Nu_arr, f_arr = TPMSCorrelations.get_correlations('Diamond', Re_range, Pr_test, 'Gas')
+    Nu_arr, f_arr = ThermoHydraulicCorrelations.get_correlations('Diamond', Re_range, Pr_test, 'Gas')
     
     print(f"{'Re':>6} {'Nu':>8} {'f':>10} {'PEC':>8}")
     print("-"*35)

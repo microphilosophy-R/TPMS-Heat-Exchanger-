@@ -2,6 +2,9 @@
   "channels": {
     "cold": {
       "geometry": {
+        "fin_height": 0.0095,
+        "fin_spacing": 0.0032,
+        "fin_thickness": 0.0006,
         "height": null,
         "length": null,
         "unit_cell_size": null,
@@ -17,11 +20,14 @@
         "particle_diameter": 0.001,
         "shape_factor": 1.0
       },
-      "structure": "Gyroid",
-      "surface_area_density": 655.292
+      "structure": "PlateFin",
+      "surface_area_density": 776.3157894736842
     },
     "hot": {
       "geometry": {
+        "fin_height": 0.0095,
+        "fin_spacing": 0.0032,
+        "fin_thickness": 0.0006,
         "height": null,
         "length": null,
         "unit_cell_size": null,
@@ -37,18 +43,23 @@
         "particle_diameter": 0.001,
         "shape_factor": 1.0
       },
-      "structure": "Primitive",
-      "surface_area_density": 491.15
+      "structure": "PlateFin",
+      "surface_area_density": 776.3157894736842
     }
   },
   "geometry": {
+    "fin_height": 0.0095,
+    "fin_spacing": 0.0032,
+    "fin_thickness": 0.0006,
     "height": 0.25,
     "identical_channels": true,
     "length": 4.2,
+    "perf_density": 0.0,
+    "perf_radius": 0.0,
     "plate_thickness": 0.001,
     "porosity_cold": 0.7,
     "porosity_hot": 0.32,
-    "surface_area_density": 655.292,
+    "surface_area_density": 776.3157894736842,
     "unit_cell_size": 0.005,
     "wall_thickness": 0.0005,
     "width": 0.25

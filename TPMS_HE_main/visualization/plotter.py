@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import pandas as pd
-from tpms_correlations import TPMSCorrelations
+from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelations
 
 
 class TPMSVisualizer:

@@ -107,6 +107,8 @@ class TPMSHeatExchanger:
         # 3. Initialize Stream Constants (per-channel geometry applied)
         por_h = eps_h
         por_c = eps_c
+        n_layers_h = self.config['channels']['hot']['geometry'].get('n_layers', 1.0)
+        n_layers_c = self.config['channels']['cold']['geometry'].get('n_layers', 1.0)
         self.streams = {
             'hot': {
                 'species': self.config['operating'].get('fluid_hot', 'hydrogen mixture'),
@@ -116,7 +118,7 @@ class TPMSHeatExchanger:
                 'packed_mode': self.config['channels']['hot']['packed']['mode'],
                 'htc_model': self.config['channels']['hot']['packed']['htc_model'],
                 'porosity': por_h,
-                'Ac': W_h * H_h * por_h,
+                'Ac': W_h * H_h * por_h * n_layers_h,
                 'Dh': 4 * por_h * Lc_h / (2 * np.pi),
                 'fluid_type': _infer_fluid_type(self.config['operating'].get('fluid_hot', 'hydrogen mixture')),
             },
@@ -128,7 +130,7 @@ class TPMSHeatExchanger:
                 'packed_mode': self.config['channels']['cold']['packed']['mode'],
                 'htc_model': self.config['channels']['cold']['packed']['htc_model'],
                 'porosity': por_c,
-                'Ac': W_c * H_c * por_c,
+                'Ac': W_c * H_c * por_c * n_layers_c,
                 'Dh': 4 * por_c * Lc_c / (2 * np.pi),
                 'fluid_type': _infer_fluid_type(self.config['operating'].get('fluid_cold', 'helium')),
             }

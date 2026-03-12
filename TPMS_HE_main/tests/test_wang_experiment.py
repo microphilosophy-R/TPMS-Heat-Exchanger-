@@ -51,6 +51,7 @@ def run_case(case_id, P_back, m_ratio, Th_in, Th_out_exp, Tc_in, Tc_out_exp):
                 'structure': 'PlateFin', 'mode': 'bare',
                 'geometry': {
                     'height': 9.5e-3,
+                    'n_layers': 2.0,
                     'fin_height': 9.5e-3,
                     'fin_spacing': 1.0e-3,
                     'fin_thickness': 0.2e-3,

@@ -18,7 +18,7 @@ from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelation
 # Channel modes accepted by the solver
 SUPPORTED_CHANNEL_MODES = ("bare", "packed")
 # Packed-bed uncertainty modes
-SUPPORTED_HTC_MODELS = ('martin_nilles', 'dixon')
+SUPPORTED_HTC_MODELS = ('martin_nilles', 'dixon', 'wang_experiment')
 
 # ── Re-export for backward compatibility ───────────────────────────────────────
 # These are needed by solver/calculator.py without a cross-import
@@ -71,6 +71,7 @@ def _normalize_single_channel(cfg, stream_key):
         "particle_diameter": cat.get("particle_diameter", 1e-3),
         "bed_porosity": cat.get("bed_porosity", 0.40),
         "k_solid": cat.get("k_solid", 10.0),
+        "k_solid_material": cat.get("k_solid_material", None),
         "shape_factor": cat.get("shape_factor", 1.0),
         "mode": cat.get("mode", "nominal"),
     }
@@ -132,6 +133,7 @@ def _normalize_single_channel(cfg, stream_key):
             # Structural porosity (was porosity_hot/cold in global geometry)
             "porosity":       float(ch_geo_raw.get("porosity",
                                    geo.get(f"porosity_{stream_key}", _por_default))),
+            "n_layers":       float(ch_geo_raw.get("n_layers", 1.0)),
         },
     }
     if ch_sad is not None:
@@ -184,6 +186,7 @@ def normalize_config(config):
 
     material = cfg["material"]
     material.setdefault("k_wall", 237.0)
+    material.setdefault("plate_material", None)
 
     operating = cfg["operating"]
     operating.setdefault("Th_in", 78.0)

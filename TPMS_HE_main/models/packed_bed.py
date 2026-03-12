@@ -62,7 +62,24 @@ class PackedBedTPMSModel:
         # 催化剂填充床参数
         self.d_p = catalyst_config['particle_diameter']
         self.eps_bed = catalyst_config['bed_porosity']
-        self.k_s = catalyst_config['k_solid']
+
+        # Support both scalar and callable k_solid
+        k_solid_input = catalyst_config.get('k_solid', 10.0)
+        k_solid_material = catalyst_config.get('k_solid_material', None)
+
+        if k_solid_material:
+            try:
+                from models.solid_props import get_k_solid
+                self.k_s = lambda T: get_k_solid(k_solid_material, T)
+                self._k_s_is_callable = True
+            except Exception as e:
+                warnings.warn(f"Could not load material '{k_solid_material}': {e}. Using constant k_solid")
+                self.k_s = float(k_solid_input)
+                self._k_s_is_callable = False
+        else:
+            self.k_s = float(k_solid_input)
+            self._k_s_is_callable = False
+
         self.sphericity = catalyst_config.get('shape_factor', 1.0)
 
         # TPMS/PlateFin几何参数
@@ -78,7 +95,7 @@ class PackedBedTPMSModel:
 
         if self.d_p <= 0:
             raise ValueError("particle_diameter must be > 0")
-        if self.k_s <= 0:
+        if not self._k_s_is_callable and self.k_s <= 0:
             raise ValueError("k_solid must be > 0")
         if self.sphericity <= 0:
             raise ValueError("shape_factor must be > 0")
@@ -94,11 +111,17 @@ class PackedBedTPMSModel:
                 f"可能不满足连续介质假设, 结果仅供参考"
             )
 
+    def _eval_k_s(self, T=None):
+        """Evaluate k_solid at temperature T (or use constant)"""
+        if self._k_s_is_callable:
+            return self.k_s(T) if T is not None else self.k_s(50.0)
+        return self.k_s
+
     # ================================================================
     # 1. 有效导热系数
     # ================================================================
 
-    def effective_conductivity_stagnant(self, k_f):
+    def effective_conductivity_stagnant(self, k_f, T=None):
         """
         Zehner-Bauer-Schlünder 静态有效导热系数。
 
@@ -108,6 +131,8 @@ class PackedBedTPMSModel:
         ----------
         k_f : float
             流体导热系数 [W/m·K]
+        T : float, optional
+            温度 [K], 用于温度依赖的k_solid
 
         Returns
         -------
@@ -115,8 +140,8 @@ class PackedBedTPMSModel:
             静态有效导热系数 [W/m·K]
         """
         eps = self.eps_bed
-        kappa = self.k_s / k_f  # 固液导热系数比
-        k_s_val = self.k_s
+        k_s_val = self._eval_k_s(T)
+        kappa = k_s_val / k_f  # 固液导热系数比
 
         # --- Maxwell 有效介质模型 (对所有正kappa稳定) ---
         num = k_s_val + 2.0 * k_f + 2.0 * (1.0 - eps) * (k_s_val - k_f)
@@ -176,9 +201,9 @@ class PackedBedTPMSModel:
         C_disp = 0.1  # 径向弥散 (Wen-Fan)
         return C_disp * Pe_p * k_f
 
-    def effective_conductivity_total(self, k_f, Re_p, Pr):
+    def effective_conductivity_total(self, k_f, Re_p, Pr, T=None):
         """总径向有效导热系数 = 静态 + 弥散。"""
-        k_0 = self.effective_conductivity_stagnant(k_f)
+        k_0 = self.effective_conductivity_stagnant(k_f, T)
         k_d = self.effective_conductivity_dispersion(k_f, Re_p, Pr)
         return k_0 + k_d
 
@@ -197,7 +222,7 @@ class PackedBedTPMSModel:
         Re_safe = max(Re_p, 1e-6)
         return 1.0 / (0.11 + 20.64 / Re_safe)
 
-    def effective_conductivity_dixon_stagnant(self, k_f):
+    def effective_conductivity_dixon_stagnant(self, k_f, T=None):
         """
         Dixon幂律静态有效径向导热系数 (Eq 0.3 静态项):
             k_r^0 = λ_h * (λ_s/λ_h)^(0.28 - 0.757·log10(ε) - 0.057·log10(λ_s/λ_h))
@@ -206,13 +231,16 @@ class PackedBedTPMSModel:
         ----------
         k_f : float
             流体导热系数 λ_h [W/m·K]
+        T : float, optional
+            温度 [K], 用于温度依赖的k_solid
 
         Returns
         -------
         k_r0 : float
             静态有效径向导热系数 [W/m·K]
         """
-        kappa = self.k_s / k_f
+        k_s_val = self._eval_k_s(T)
+        kappa = k_s_val / k_f
         exponent = (
             0.28
             - 0.757 * np.log10(self.eps_bed)
@@ -220,7 +248,7 @@ class PackedBedTPMSModel:
         )
         return k_f * (kappa ** exponent)
 
-    def effective_conductivity_dixon(self, k_f, Re_p, Pr):
+    def effective_conductivity_dixon(self, k_f, Re_p, Pr, T=None):
         """
         Dixon总有效径向导热系数: 静态项 + Pe_r弥散项 (Eq 0.3):
             k_r = k_r^0 + (λ_h / Pe_r) · Re · Pr
@@ -230,12 +258,13 @@ class PackedBedTPMSModel:
         k_f : float   流体导热系数 [W/m·K]
         Re_p : float  颗粒Reynolds数
         Pr : float    Prandtl数
+        T : float, optional  温度 [K]
 
         Returns
         -------
         k_r : float   总有效径向导热系数 [W/m·K]
         """
-        k_r0 = self.effective_conductivity_dixon_stagnant(k_f)
+        k_r0 = self.effective_conductivity_dixon_stagnant(k_f, T)
         Pe_r = self._radial_peclet_dixon(Re_p)
         k_disp = k_f * Re_p * Pr / Pe_r
         return k_r0 + k_disp
@@ -263,6 +292,32 @@ class PackedBedTPMSModel:
         term1 = 0.3 * Pr ** (1.0 / 3.0) * Re_p ** 0.75
         term2 = 0.054 * Re_p * Pr
         Nu_w = Nu_w0 + 1.0 / (1.0 / max(term1, 1e-30) + 1.0 / max(term2, 1e-30))
+        h_w = Nu_w * k_f / self.d_p
+        return h_w, Nu_w
+
+    def wall_htc_wang_experiment(self, Re_p, Pr, k_f):
+        """
+        Wang experiment correlation for packed bed in plate-fin channel.
+
+        Nu_ce = 0.028535 * Re^1.0651 * Pr^5.3106
+
+        Fitted to 90 experimental data points:
+        - Re range: [67.6, 1331.8]
+        - Pr range: [0.693, 0.735]
+        - Nu range: [0.43, 11.42]
+
+        Parameters
+        ----------
+        Re_p : float    颗粒Reynolds数
+        Pr : float      Prandtl数
+        k_f : float     流体导热系数 [W/m·K]
+
+        Returns
+        -------
+        h_w : float   壁面传热系数 [W/m²·K]
+        Nu_w : float  壁面Nusselt数 (基于d_p)
+        """
+        Nu_w = 0.028535 * Re_p**1.0651 * Pr**5.3106
         h_w = Nu_w * k_f / self.d_p
         return h_w, Nu_w
 
@@ -359,7 +414,7 @@ class PackedBedTPMSModel:
     # 4. 综合壁面传热系数 (含区间估计)
     # ================================================================
 
-    def overall_htc_dixon(self, Re_p, Pr, k_f, mode='nominal', Nu_w0=20.0):
+    def overall_htc_dixon(self, Re_p, Pr, k_f, mode='nominal', Nu_w0=20.0, T=None):
         """
         Dixon热阻模型综合传热系数 (Eqs 0.1, 0.2):
             1/h_i = 1/h_w + (D_h/(6·k_r))·(Bi+3)/(Bi+4)
@@ -375,6 +430,7 @@ class PackedBedTPMSModel:
         k_f : float     流体导热系数 [W/m·K]
         mode : str      'lower', 'nominal', 'upper'
         Nu_w0 : float   无流量壁面Nusselt数基值 (默认20)
+        T : float, optional  温度 [K]
 
         Returns
         -------
@@ -382,7 +438,7 @@ class PackedBedTPMSModel:
         details : dict  热阻分解及中间量
         """
         h_w, Nu_w = self.wall_htc_dixon(Re_p, Pr, k_f, Nu_w0)
-        k_r = self.effective_conductivity_dixon(k_f, Re_p, Pr)
+        k_r = self.effective_conductivity_dixon(k_f, Re_p, Pr, T)
 
         d_i = self.D_h  # hydraulic diameter: for Bi, Nu_w, and R_bed conduction path
         Bi = h_w * d_i / (2.0 * k_r)
@@ -426,7 +482,7 @@ class PackedBedTPMSModel:
             'htc_model': 'dixon',
             'h_w': h_w,
             'Nu_w': Nu_w,
-            'k_r_stagnant': self.effective_conductivity_dixon_stagnant(k_f),
+            'k_r_stagnant': self.effective_conductivity_dixon_stagnant(k_f, T),
             'k_r': k_r,
             'Bi': Bi,
             'R_wall_film': R_w,
@@ -443,7 +499,7 @@ class PackedBedTPMSModel:
         return h_i, details
 
     def overall_htc_packed_side(self, Re_p, Pr, k_f, mode='nominal',
-                                htc_model='martin_nilles'):
+                                htc_model='martin_nilles', T=None):
         """
         填充床侧的综合有效传热系数。
 
@@ -466,6 +522,8 @@ class PackedBedTPMSModel:
             'lower', 'nominal', 'upper'
         htc_model : str
             'martin_nilles' (默认) 或 'dixon'
+        T : float, optional
+            温度 [K]
 
         Returns
         -------
@@ -482,15 +540,17 @@ class PackedBedTPMSModel:
 
         # --- Dixon 模型分发 ---
         if str(htc_model).strip().lower() == 'dixon':
-            return self.overall_htc_dixon(Re_p, Pr, k_f, mode=mode)
+            return self.overall_htc_dixon(Re_p, Pr, k_f, mode=mode, T=T)
 
-        # --- Martin-Nilles 模型 (默认) ---
-        # 壁面传热系数
-
-        h_w, Nu_w = self.wall_htc_packed_bed(Re_p, Pr, k_f)
-
-        # 有效导热系数
-        k_r_eff = self.effective_conductivity_total(k_f, Re_p, Pr)
+        # --- Wang experiment 模型分发 ---
+        if str(htc_model).strip().lower() == 'wang_experiment':
+            h_w, Nu_w = self.wall_htc_wang_experiment(Re_p, Pr, k_f)
+            k_r_eff = self.effective_conductivity_total(k_f, Re_p, Pr, T)
+            # Continue with Martin-Nilles thermal resistance model
+        else:
+            # --- Martin-Nilles 模型 (默认) ---
+            h_w, Nu_w = self.wall_htc_packed_bed(Re_p, Pr, k_f)
+            k_r_eff = self.effective_conductivity_total(k_f, Re_p, Pr, T)
 
         # 模式相关参数
         # TPMS增强体现在两个方面:
@@ -544,7 +604,7 @@ class PackedBedTPMSModel:
         details = {
             'h_w': h_w,
             'Nu_w': Nu_w,
-            'k_eff_stagnant': self.effective_conductivity_stagnant(k_f),
+            'k_eff_stagnant': self.effective_conductivity_stagnant(k_f, T),
             'k_r_eff': k_r_eff,
             'k_r_adjusted': k_r_adj,
             'R_wall_film': R_wall_film,
@@ -658,7 +718,7 @@ class PackedBedTPMSModel:
     # ================================================================
 
     def get_htc_and_friction(self, Re_channel, Pr, k_f, tpms_type='Diamond',
-                             mode='nominal', htc_model='martin_nilles'):
+                             mode='nominal', htc_model='martin_nilles', T=None):
         """
         统一接口: 返回有效传热系数和等效摩擦因子。
 
@@ -678,6 +738,8 @@ class PackedBedTPMSModel:
             估计模式: 'lower', 'nominal', 'upper'
         htc_model : str
             传热子模型: 'martin_nilles' (默认) 或 'dixon'
+        T : float, optional
+            温度 [K]
 
         Returns
         -------
@@ -699,7 +761,7 @@ class PackedBedTPMSModel:
 
         # 传热
         h_eff, details = self.overall_htc_packed_side(Re_p, Pr, k_f, mode,
-                                                      htc_model=htc_model)
+                                                      htc_model=htc_model, T=T)
 
         # 压降
         f_base = self.friction_factor_ergun(Re_p)
@@ -717,7 +779,7 @@ class PackedBedTPMSModel:
     # 7. 区间估计
     # ================================================================
 
-    def interval_estimate(self, Re_p, Pr, k_f, htc_model='martin_nilles'):
+    def interval_estimate(self, Re_p, Pr, k_f, htc_model='martin_nilles', T=None):
         """
         返回 lower / nominal / upper 三档传热系数估计。
 
@@ -733,6 +795,8 @@ class PackedBedTPMSModel:
             流体导热系数 [W/m·K]
         htc_model : str
             传热子模型: 'martin_nilles' (默认) 或 'dixon'
+        T : float, optional
+            温度 [K]
 
         Returns
         -------
@@ -743,7 +807,7 @@ class PackedBedTPMSModel:
         results = {}
         for mode in ['lower', 'nominal', 'upper']:
             h_eff, details = self.overall_htc_packed_side(Re_p, Pr, k_f, mode,
-                                                         htc_model=htc_model)
+                                                         htc_model=htc_model, T=T)
             results[mode] = {'h_eff': h_eff, 'details': details}
         return results
 

@@ -49,10 +49,17 @@
       "Bash(.venvScriptspip install scikit-image)",
       "Bash(\"C:\\\\大论文\\\\code\\\\TPMS_HE\\\\.venv\\\\Scripts\\\\python.exe\" -c:*)",
       "Bash(\"C:\\\\大论文\\\\code\\\\TPMS_HE\\\\.venv\\\\Scripts\\\\python.exe\" -c \"import skimage; print\\(skimage.__version__\\)\")",
-      "Bash(pip show:*)"
+      "Bash(pip show:*)",
+      "Bash(git clone:*)",
+      "Read(//tmp/**)",
+      "Bash(.venv/Scripts/python:*)",
+      "Bash(.venv/Scripts/pip install:*)",
+      "Bash(../.venv/Scripts/python:*)"
     ],
     "additionalDirectories": [
-      "c:\\大论文\\validation\\code"
+      "c:\\大论文\\validation\\code",
+      "\\tmp\\solidprops_check\\SolidProps\\lib",
+      "c:\\大论文\\code\\TPMS_HE\\TPMS_HE_main\\models"
     ]
   }
 }

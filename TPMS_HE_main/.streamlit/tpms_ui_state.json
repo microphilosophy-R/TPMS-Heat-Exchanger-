@@ -65,7 +65,6 @@
   "operating": {
     "Pc_in": 1500000.0,
     "Ph_in": 2000000.0,
-    "T_ambient": 298.0,
     "Tc_in": 43.0,
     "Th_in": 78.0,
     "fluid_cold": "helium",

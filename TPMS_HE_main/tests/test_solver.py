@@ -105,3 +105,18 @@ def test_cpfhx_outlet_temperature_in_range(cpfhx_result):
     assert abs(Th_out - 55.1) < 12.0, (
         f"CPFHX Th_out = {Th_out:.2f} K, expected near 55.1 ± 12 K"
     )
+
+def test_arrhenius_kinetics_mode_smoke():
+    cfg = _fast_config(create_default_config(), n_elements=6)
+    cfg["channels"]["hot"]["mode"] = "packed"
+    cfg["channels"]["hot"]["packed"]["kinetic_model"] = "arrhenius_first_order"
+    cfg["channels"]["hot"]["packed"]["hydraulic_model"] = "phi_re_fit"
+    cfg["channels"]["hot"]["packed"]["ht_enhancement_model"] = "from_phi"
+
+    hx = TPMSHeatExchanger(cfg)
+    hx._update_stream_physics("hot")
+    hx._update_stream_physics("cold")
+    hx._ortho_para_conversion()
+
+    assert np.all(np.isfinite(hx.dx_dt))
+    assert np.all(hx.xh >= 0.0) and np.all(hx.xh <= 1.0)

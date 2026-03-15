@@ -705,6 +705,14 @@ class TPMSHeatExchanger:
         Ac = self.streams['hot']['Ac']
         mh = self.streams['hot']['m']
         Tc_H2, Pc_H2 = 32.938, 1.284e6
+        packed_cfg = self.config.get('channels', {}).get('hot', {}).get('packed', {}) or {}
+        kinetic_model = str(packed_cfg.get('kinetic_model', 'legacy_kw')).strip().lower()
+        kinetic_params = packed_cfg.get('kinetic_params', {}) or {}
+        Ea = float(kinetic_params.get('Ea_J_per_mol', -336.45))
+        a_k = float(kinetic_params.get('a_m3s_per_mol', 2.2e-3))
+        b_k = float(kinetic_params.get('b_s_inv', -35.11e-3))
+        R_u = 8.314
+        M_H2 = 2.016e-3
 
         for i in range(self.N):
             T = 0.5 * (self.Th[i] + self.Th[i + 1])
@@ -720,17 +728,26 @@ class TPMSHeatExchanger:
                 props = self.h2_props.get_properties(T, P, "hydrogen mixture", x)
                 rho = props['rho']
 
-                C_H2 = rho / 0.002016
-                kw = 34.76 - 220.9 * (T / Tc_H2) - 20.65 * (P / Pc_H2)
+                C_H2 = rho / M_H2
+                if kinetic_model == 'arrhenius_first_order':
+                    x_eq_safe = max(float(x_eq), 1e-9)
+                    den = a_k * C_H2 + b_k
+                    if abs(den) < 1e-12:
+                        den = 1e-12 if den >= 0 else -1e-12
+                    rate = np.exp(-Ea / (R_u * max(T, 1e-9))) / den / x_eq_safe
+                else:
+                    kw = 34.76 - 220.9 * (T / Tc_H2) - 20.65 * (P / Pc_H2)
 
                 # Guard against blow-up at pure limits (x→0 or x→1)
-                x_s    = np.clip(x,    1e-9, 1.0 - 1e-9)
-                x_eq_s = np.clip(x_eq, 1e-9, 1.0 - 1e-9)
-                term   = (1.0 - x_eq_s) / (1.0 - x_s)
+                    x_s    = np.clip(x,    1e-9, 1.0 - 1e-9)
+                    x_eq_s = np.clip(x_eq, 1e-9, 1.0 - 1e-9)
+                    term   = (1.0 - x_eq_s) / (1.0 - x_s)
                 # Reversible: rate > 0 (forward, ortho→para) when x < x_eq
                 #             rate < 0 (backward, para→ortho) when x > x_eq
                 # kw < 0 at cryogenic T → sign convention consistent with thermodynamics
-                rate = (kw / C_H2) * np.log(term)   # [1/s], signed
+                    rate = (kw / C_H2) * np.log(term)   # [1/s], signed
+                if not np.isfinite(rate):
+                    rate = 0.0
                 rate = np.clip(rate, -10.0, 10.0)    # symmetric magnitude cap only
 
                 u = mh / (rho * Ac)

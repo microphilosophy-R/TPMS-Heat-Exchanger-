@@ -1,28 +1,28 @@
-"""
-多孔介质 + TPMS 耦合传热模型
+﻿"""
+澶氬瓟浠嬭川 + TPMS 鑰﹀悎浼犵儹妯″瀷
 Packed Bed + TPMS Combined Heat Transfer Model
 
-当TPMS流道内填充催化剂颗粒时，壁面到流体的传热路径变为：
-  流体主体 → 填充床弥散/对流 → 有效导热 → 近壁区 → TPMS壁面
+褰揟PMS娴侀亾鍐呭～鍏呭偓鍖栧墏棰楃矑鏃讹紝澹侀潰鍒版祦浣撶殑浼犵儹璺緞鍙樹负锛?
+  娴佷綋涓讳綋 鈫?濉厖搴婂讥鏁?瀵规祦 鈫?鏈夋晥瀵肩儹 鈫?杩戝鍖?鈫?TPMS澹侀潰
 
-本模块包含：
-1. 有效导热系数 (模型A): Zehner-Bauer-Schlünder (静态) + 弥散项 (Wen-Fan)
-2. 壁面传热系数 (模型A): Martin-Nilles
-3. 有效导热系数 (模型B): Dixon幂律静态关联 + Re依赖Peclet弥散项
-4. 壁面传热系数 (模型B): Dixon Nu_w关联式
-5. 综合壁面传热系数: 双区域模型 + TPMS翅片效应 (两种模型共用)
-6. 压降: 修正Ergun方程 + TPMS校正因子
-7. 区间估计: lower / nominal / upper
+鏈ā鍧楀寘鍚細
+1. 鏈夋晥瀵肩儹绯绘暟 (妯″瀷A): Zehner-Bauer-Schl眉nder (闈欐€? + 寮ユ暎椤?(Wen-Fan)
+2. 澹侀潰浼犵儹绯绘暟 (妯″瀷A): Martin-Nilles
+3. 鏈夋晥瀵肩儹绯绘暟 (妯″瀷B): Dixon骞傚緥闈欐€佸叧鑱?+ Re渚濊禆Peclet寮ユ暎椤?
+4. 澹侀潰浼犵儹绯绘暟 (妯″瀷B): Dixon Nu_w鍏宠仈寮?
+5. 缁煎悎澹侀潰浼犵儹绯绘暟: 鍙屽尯鍩熸ā鍨?+ TPMS缈呯墖鏁堝簲 (涓ょ妯″瀷鍏辩敤)
+6. 鍘嬮檷: 淇Ergun鏂圭▼ + TPMS鏍℃鍥犲瓙
+7. 鍖洪棿浼拌: lower / nominal / upper
 
-htc_model 参数选择传热子模型:
-  'martin_nilles' (默认): ZBS/Maxwell 静态导热 + Martin-Nilles 壁面传热
-  'dixon':                Dixon 幂律静态导热 + Dixon Nu_w 壁面传热 + Dixon 热阻公式
+htc_model 鍙傛暟閫夋嫨浼犵儹瀛愭ā鍨?
+  'martin_nilles' (榛樿): ZBS/Maxwell 闈欐€佸鐑?+ Martin-Nilles 澹侀潰浼犵儹
+  'dixon':                Dixon 骞傚緥闈欐€佸鐑?+ Dixon Nu_w 澹侀潰浼犵儹 + Dixon 鐑樆鍏紡
 
-接口兼容现有 TPMSHeatExchanger 求解器。
+鎺ュ彛鍏煎鐜版湁 TPMSHeatExchanger 姹傝В鍣ㄣ€?
 
 References
 ----------
-- Zehner & Schlünder (1970), Chemie Ingenieur Technik, 42(14), 933-941.
+- Zehner & Schl眉nder (1970), Chemie Ingenieur Technik, 42(14), 933-941.
 - Martin & Nilles (1993), Chem. Eng. Process., 32(2), 77-83.
 - Ergun (1952), Chem. Eng. Progress, 48, 89-94.
 - Dixon & Cresswell (1979), AIChE Journal, 25(4), 663-676.
@@ -33,33 +33,45 @@ import numpy as np
 import warnings
 
 SUPPORTED_PACKED_MODES = ('lower', 'nominal', 'upper')
+SUPPORTED_HYDRAULIC_MODELS = ('psi_legacy', 'phi_re_fit')
+SUPPORTED_PHI_SOURCES = ('ch3_f_re_fit',)
+SUPPORTED_HT_ENHANCEMENT_MODELS = ('off', 'from_phi')
+SUPPORTED_HT_NOMINAL_RULES = ('geometric', 'arithmetic')
+
+# Chapter 3 fit summary: f = A * Re^b
+_CH3_F_RE_COEFFS = {
+    'Diamond': (3263.281605, -0.905257),
+    'Gyroid': (2005.814133, -0.873869),
+    'Plate': (522.376132, -0.924664),
+    'Wavy': (1626.060415, -0.866665),
+}
 
 
 class PackedBedTPMSModel:
     """
-    TPMS流道内填充床的耦合传热与压降模型。
+    TPMS娴侀亾鍐呭～鍏呭簥鐨勮€﹀悎浼犵儹涓庡帇闄嶆ā鍨嬨€?
 
-    热阻分解:
+    鐑樆鍒嗚В:
         1/h_eff = 1/h_w + D_h / (C_shape * k_r,eff)
 
-    其中 h_w 为壁面传热系数, k_r,eff 为径向有效导热系数,
-    D_h 为TPMS水力直径, C_shape 为几何因子。
+    鍏朵腑 h_w 涓哄闈紶鐑郴鏁? k_r,eff 涓哄緞鍚戞湁鏁堝鐑郴鏁?
+    D_h 涓篢PMS姘村姏鐩村緞, C_shape 涓哄嚑浣曞洜瀛愩€?
 
     Parameters
     ----------
     catalyst_config : dict
-        particle_diameter : float  催化剂粒径 [m]
-        bed_porosity : float       床层孔隙率 [-]
-        k_solid : float            催化剂固体导热系数 [W/m·K]
-        shape_factor : float       颗粒球形度 [-], 默认1.0
+        particle_diameter : float  鍌寲鍓傜矑寰?[m]
+        bed_porosity : float       搴婂眰瀛旈殭鐜?[-]
+        k_solid : float            鍌寲鍓傚浐浣撳鐑郴鏁?[W/m路K]
+        shape_factor : float       棰楃矑鐞冨舰搴?[-], 榛樿1.0
     tpms_geometry : dict
-        D_h : float                TPMS通道水力直径 [m]
-        wall_thickness : float     TPMS壁厚 [m]
-        k_wall : float             TPMS壁面材料导热系数 [W/m·K]
+        D_h : float                TPMS閫氶亾姘村姏鐩村緞 [m]
+        wall_thickness : float     TPMS澹佸帤 [m]
+        k_wall : float             TPMS澹侀潰鏉愭枡瀵肩儹绯绘暟 [W/m路K]
     """
 
     def __init__(self, catalyst_config, tpms_geometry):
-        # 催化剂填充床参数
+        # 鍌寲鍓傚～鍏呭簥鍙傛暟
         self.d_p = catalyst_config['particle_diameter']
         self.eps_bed = catalyst_config['bed_porosity']
 
@@ -82,16 +94,21 @@ class PackedBedTPMSModel:
 
         self.sphericity = catalyst_config.get('shape_factor', 1.0)
 
-        # TPMS/PlateFin几何参数
+        # TPMS/PlateFin鍑犱綍鍙傛暟
         self.D_h = tpms_geometry['D_h']
         self.t_wall = tpms_geometry['wall_thickness']
         self.k_wall = tpms_geometry['k_wall']
-        # PlateFin-specific: fin height and Af/Ah ratio for plate-fin efficiency (Eqs. 10–12)
+        # PlateFin-specific: fin height and Af/Ah ratio for plate-fin efficiency (Eqs. 10鈥?2)
         self.fin_height_for_eff = tpms_geometry.get('fin_height', None)
         self.Af_Ah_ratio        = tpms_geometry.get('Af_Ah_ratio', None)
-        # Fin-to-base-plate area ratio: Afin/Abase where Abase = width × length
-        # TPMS: alpha * H (SAD × channel height); PlateFin: (2*Hf - tf) / sf
+        # Fin-to-base-plate area ratio: Afin/Abase where Abase = width 脳 length
+        # TPMS: alpha * H (SAD 脳 channel height); PlateFin: (2*Hf - tf) / sf
         self.Afin_Abase = tpms_geometry.get('Afin_Abase_ratio', 0.0)
+        # Model controls for hydraulic/thermal enhancement
+        self.hydraulic_model = str(catalyst_config.get('hydraulic_model', 'psi_legacy')).strip().lower()
+        self.phi_source = str(catalyst_config.get('phi_source', 'ch3_f_re_fit')).strip().lower()
+        self.ht_enhancement_model = str(catalyst_config.get('ht_enhancement_model', 'off')).strip().lower()
+        self.ht_nominal_rule = str(catalyst_config.get('ht_nominal_rule', 'geometric')).strip().lower()
 
         if self.d_p <= 0:
             raise ValueError("particle_diameter must be > 0")
@@ -101,14 +118,24 @@ class PackedBedTPMSModel:
             raise ValueError("shape_factor must be > 0")
         if not (0.05 <= self.eps_bed <= 0.95):
             raise ValueError("bed_porosity must be within [0.05, 0.95]")
+        if self.hydraulic_model not in SUPPORTED_HYDRAULIC_MODELS:
+            raise ValueError(f"hydraulic_model must be one of {SUPPORTED_HYDRAULIC_MODELS}")
+        if self.phi_source not in SUPPORTED_PHI_SOURCES:
+            raise ValueError(f"phi_source must be one of {SUPPORTED_PHI_SOURCES}")
+        if self.ht_enhancement_model not in SUPPORTED_HT_ENHANCEMENT_MODELS:
+            raise ValueError(
+                f"ht_enhancement_model must be one of {SUPPORTED_HT_ENHANCEMENT_MODELS}"
+            )
+        if self.ht_nominal_rule not in SUPPORTED_HT_NOMINAL_RULES:
+            raise ValueError(f"ht_nominal_rule must be one of {SUPPORTED_HT_NOMINAL_RULES}")
 
-        # 派生参数
-        self.N_ratio = self.D_h / self.d_p  # 管径/粒径比
+        # 娲剧敓鍙傛暟
+        self.N_ratio = self.D_h / self.d_p  # 绠″緞/绮掑緞姣?
 
         if self.N_ratio < 2:
             warnings.warn(
-                f"D_h/d_p = {self.N_ratio:.1f} < 2: 填充床在此尺度下"
-                f"可能不满足连续介质假设, 结果仅供参考"
+                f"D_h/d_p = {self.N_ratio:.1f} < 2: continuum assumption may be weak; "
+                "use results with caution."
             )
 
     def _eval_k_s(self, T=None):
@@ -118,42 +145,42 @@ class PackedBedTPMSModel:
         return self.k_s
 
     # ================================================================
-    # 1. 有效导热系数
+    # 1. 鏈夋晥瀵肩儹绯绘暟
     # ================================================================
 
     def effective_conductivity_stagnant(self, k_f, T=None):
         """
-        Zehner-Bauer-Schlünder 静态有效导热系数。
+        Zehner-Bauer-Schl眉nder 闈欐€佹湁鏁堝鐑郴鏁般€?
 
-        无流动时填充床的等效导热系数，考虑固-液两相导热。
+        鏃犳祦鍔ㄦ椂濉厖搴婄殑绛夋晥瀵肩儹绯绘暟锛岃€冭檻鍥?娑蹭袱鐩稿鐑€?
 
         Parameters
         ----------
         k_f : float
-            流体导热系数 [W/m·K]
+            娴佷綋瀵肩儹绯绘暟 [W/m路K]
         T : float, optional
-            温度 [K], 用于温度依赖的k_solid
+            娓╁害 [K], 鐢ㄤ簬娓╁害渚濊禆鐨刱_solid
 
         Returns
         -------
         k_eff_0 : float
-            静态有效导热系数 [W/m·K]
+            闈欐€佹湁鏁堝鐑郴鏁?[W/m路K]
         """
         eps = self.eps_bed
         k_s_val = self._eval_k_s(T)
-        kappa = k_s_val / k_f  # 固液导热系数比
+        kappa = k_s_val / k_f  # 鍥烘恫瀵肩儹绯绘暟姣?
 
-        # --- Maxwell 有效介质模型 (对所有正kappa稳定) ---
+        # --- Maxwell 鏈夋晥浠嬭川妯″瀷 (瀵规墍鏈夋kappa绋冲畾) ---
         num = k_s_val + 2.0 * k_f + 2.0 * (1.0 - eps) * (k_s_val - k_f)
         den = k_s_val + 2.0 * k_f - (1.0 - eps) * (k_s_val - k_f)
         k_maxwell = k_f * num / den
 
-        # --- ZBS 模型 (高kappa时更准确, 但在kappa≈B附近不稳定) ---
+        # --- ZBS 妯″瀷 (楂榢appa鏃舵洿鍑嗙‘, 浣嗗湪kappa鈮圔闄勮繎涓嶇ǔ瀹? ---
         B = 1.25 * ((1.0 - eps) / eps) ** (10.0 / 9.0)
         N = 1.0 - B / kappa
 
         if kappa < 1.01 or abs(N) < 0.05:
-            # kappa接近1或N接近0的退化区: 仅用Maxwell
+            # kappa鎺ヨ繎1鎴朜鎺ヨ繎0鐨勯€€鍖栧尯: 浠呯敤Maxwell
             return max(k_maxwell, k_f)
 
         if N > 0:
@@ -164,80 +191,80 @@ class PackedBedTPMSModel:
             k_cell = k_f * (2.0 / N) * (term_a - term_b + term_c)
             k_zbs = (1.0 - np.sqrt(1.0 - eps)) * k_f + np.sqrt(1.0 - eps) * k_cell
         else:
-            # N < 0: ZBS不适用
+            # N < 0: ZBS涓嶉€傜敤
             k_zbs = k_f
 
-        # 取两种模型中的较大值, 保证单调性和稳定性
-        # Maxwell在低kappa更准确, ZBS在高kappa更准确
+        # 鍙栦袱绉嶆ā鍨嬩腑鐨勮緝澶у€? 淇濊瘉鍗曡皟鎬у拰绋冲畾鎬?
+        # Maxwell鍦ㄤ綆kappa鏇村噯纭? ZBS鍦ㄩ珮kappa鏇村噯纭?
         k_eff_0 = max(k_maxwell, k_zbs)
 
-        # 物理下界: k_eff 不可能低于纯流体导热
+        # 鐗╃悊涓嬬晫: k_eff 涓嶅彲鑳戒綆浜庣函娴佷綋瀵肩儹
         return max(k_eff_0, k_f)
 
     def effective_conductivity_dispersion(self, k_f, Re_p, Pr):
         """
-        弥散项对径向有效导热的贡献。
+        寮ユ暎椤瑰寰勫悜鏈夋晥瀵肩儹鐨勮础鐚€?
 
         k_disp = C_disp * Pe_p * k_f
-        其中 Pe_p = Re_p * Pr (颗粒Peclet数)
+        鍏朵腑 Pe_p = Re_p * Pr (棰楃矑Peclet鏁?
 
-        径向弥散系数 C_disp ≈ 0.1 (Wen-Fan)
+        寰勫悜寮ユ暎绯绘暟 C_disp 鈮?0.1 (Wen-Fan)
 
         Parameters
         ----------
         k_f : float
-            流体导热系数 [W/m·K]
+            娴佷綋瀵肩儹绯绘暟 [W/m路K]
         Re_p : float
-            颗粒Reynolds数 = ρ*u_s*d_p/μ
+            棰楃矑Reynolds鏁?= 蟻*u_s*d_p/渭
         Pr : float
-            Prandtl数
+            Prandtl鏁?
 
         Returns
         -------
         k_disp : float
-            弥散导热系数 [W/m·K]
+            寮ユ暎瀵肩儹绯绘暟 [W/m路K]
         """
         Pe_p = Re_p * Pr
-        C_disp = 0.1  # 径向弥散 (Wen-Fan)
+        C_disp = 0.1  # 寰勫悜寮ユ暎 (Wen-Fan)
         return C_disp * Pe_p * k_f
 
     def effective_conductivity_total(self, k_f, Re_p, Pr, T=None):
-        """总径向有效导热系数 = 静态 + 弥散。"""
+        """Total radial effective conductivity = stagnant + dispersion."""
         k_0 = self.effective_conductivity_stagnant(k_f, T)
         k_d = self.effective_conductivity_dispersion(k_f, Re_p, Pr)
         return k_0 + k_d
 
     # ================================================================
-    # 1b. Dixon 径向有效导热系数模型 (Eq 0.3, Eq 0.6)
+    # 1b. Dixon 寰勫悜鏈夋晥瀵肩儹绯绘暟妯″瀷 (Eq 0.3, Eq 0.6)
     # ================================================================
 
     def _radial_peclet_dixon(self, Re_p):
         """
-        径向传热Peclet数 (Eq 0.6):
+        寰勫悜浼犵儹Peclet鏁?(Eq 0.6):
             Pe_r = 1 / (0.11 + 20.64/Re)
 
-        该公式在 Re→0 时趋于 Re/20.64 避免奇点；
-        在高Re时趋于常数 1/0.11 ≈ 9.1。
+        璇ュ叕寮忓湪 Re鈫? 鏃惰秼浜?Re/20.64 閬垮厤濂囩偣锛?
+        鍦ㄩ珮Re鏃惰秼浜庡父鏁?1/0.11 鈮?9.1銆?
         """
         Re_safe = max(Re_p, 1e-6)
         return 1.0 / (0.11 + 20.64 / Re_safe)
 
     def effective_conductivity_dixon_stagnant(self, k_f, T=None):
         """
-        Dixon幂律静态有效径向导热系数 (Eq 0.3 静态项):
-            k_r^0 = λ_h * (λ_s/λ_h)^(0.28 - 0.757·log10(ε) - 0.057·log10(λ_s/λ_h))
+        Dixon骞傚緥闈欐€佹湁鏁堝緞鍚戝鐑郴鏁?(Eq 0.3 闈欐€侀」):
+            k_r^0 = 位_h * (位_s/位_h)^(0.28 - 0.757路log10(蔚) - 0.057路log10(位_s/位_h))
 
         Parameters
         ----------
         k_f : float
-            流体导热系数 λ_h [W/m·K]
+            娴佷綋瀵肩儹绯绘暟 位_h [W/m路K]
         T : float, optional
-            温度 [K], 用于温度依赖的k_solid
+            娓╁害 [K], 鐢ㄤ簬娓╁害渚濊禆鐨刱_solid
 
         Returns
         -------
         k_r0 : float
-            静态有效径向导热系数 [W/m·K]
+            闈欐€佹湁鏁堝緞鍚戝鐑郴鏁?[W/m路K]
         """
         k_s_val = self._eval_k_s(T)
         kappa = k_s_val / k_f
@@ -250,19 +277,19 @@ class PackedBedTPMSModel:
 
     def effective_conductivity_dixon(self, k_f, Re_p, Pr, T=None):
         """
-        Dixon总有效径向导热系数: 静态项 + Pe_r弥散项 (Eq 0.3):
-            k_r = k_r^0 + (λ_h / Pe_r) · Re · Pr
+        Dixon鎬绘湁鏁堝緞鍚戝鐑郴鏁? 闈欐€侀」 + Pe_r寮ユ暎椤?(Eq 0.3):
+            k_r = k_r^0 + (位_h / Pe_r) 路 Re 路 Pr
 
         Parameters
         ----------
-        k_f : float   流体导热系数 [W/m·K]
-        Re_p : float  颗粒Reynolds数
-        Pr : float    Prandtl数
-        T : float, optional  温度 [K]
+        k_f : float   娴佷綋瀵肩儹绯绘暟 [W/m路K]
+        Re_p : float  棰楃矑Reynolds鏁?
+        Pr : float    Prandtl鏁?
+        T : float, optional  娓╁害 [K]
 
         Returns
         -------
-        k_r : float   总有效径向导热系数 [W/m·K]
+        k_r : float   鎬绘湁鏁堝緞鍚戝鐑郴鏁?[W/m路K]
         """
         k_r0 = self.effective_conductivity_dixon_stagnant(k_f, T)
         Pe_r = self._radial_peclet_dixon(Re_p)
@@ -271,23 +298,23 @@ class PackedBedTPMSModel:
 
     def wall_htc_dixon(self, Re_p, Pr, k_f, Nu_w0=20.0):
         """
-        Dixon壁面传热关联式 (Eqs 0.4, 0.5):
-            Nu_w = Nu_{w,0} + 1 / (1/(0.3·Pr^(1/3)·Re^0.75) + 1/(0.054·Re·Pr))
-            h_w  = Nu_w · λ_h / d_p
+        Dixon澹侀潰浼犵儹鍏宠仈寮?(Eqs 0.4, 0.5):
+            Nu_w = Nu_{w,0} + 1 / (1/(0.3路Pr^(1/3)路Re^0.75) + 1/(0.054路Re路Pr))
+            h_w  = Nu_w 路 位_h / d_p
 
-        两项取调和平均 (并联热阻形式), 分别代表对流膜传热与湍流弥散传热的极限。
+        涓ら」鍙栬皟鍜屽钩鍧?(骞惰仈鐑樆褰㈠紡), 鍒嗗埆浠ｈ〃瀵规祦鑶滀紶鐑笌婀嶆祦寮ユ暎浼犵儹鐨勬瀬闄愩€?
 
         Parameters
         ----------
-        Re_p : float    颗粒Reynolds数
-        Pr : float      Prandtl数
-        k_f : float     流体导热系数 λ_h [W/m·K]
-        Nu_w0 : float   无流量壁面Nusselt数, 球形颗粒取中位数20 [111]
+        Re_p : float    棰楃矑Reynolds鏁?
+        Pr : float      Prandtl鏁?
+        k_f : float     娴佷綋瀵肩儹绯绘暟 位_h [W/m路K]
+        Nu_w0 : float   鏃犳祦閲忓闈usselt鏁? 鐞冨舰棰楃矑鍙栦腑浣嶆暟20 [111]
 
         Returns
         -------
-        h_w : float   壁面传热系数 [W/m²·K]
-        Nu_w : float  壁面Nusselt数 (基于d_p)
+        h_w : float   澹侀潰浼犵儹绯绘暟 [W/m虏路K]
+        Nu_w : float  澹侀潰Nusselt鏁?(鍩轰簬d_p)
         """
         term1 = 0.3 * Pr ** (1.0 / 3.0) * Re_p ** 0.75
         term2 = 0.054 * Re_p * Pr
@@ -308,50 +335,50 @@ class PackedBedTPMSModel:
 
         Parameters
         ----------
-        Re_p : float    颗粒Reynolds数
-        Pr : float      Prandtl数
-        k_f : float     流体导热系数 [W/m·K]
+        Re_p : float    棰楃矑Reynolds鏁?
+        Pr : float      Prandtl鏁?
+        k_f : float     娴佷綋瀵肩儹绯绘暟 [W/m路K]
 
         Returns
         -------
-        h_w : float   壁面传热系数 [W/m²·K]
-        Nu_w : float  壁面Nusselt数 (基于d_p)
+        h_w : float   澹侀潰浼犵儹绯绘暟 [W/m虏路K]
+        Nu_w : float  澹侀潰Nusselt鏁?(鍩轰簬d_p)
         """
         Nu_w = 0.028535 * Re_p**1.0651 * Pr**5.3106
         h_w = Nu_w * k_f / self.d_p
         return h_w, Nu_w
 
     # ================================================================
-    # 2. 壁面传热系数 (Martin-Nilles)
+    # 2. 澹侀潰浼犵儹绯绘暟 (Martin-Nilles)
     # ================================================================
 
     def wall_htc_packed_bed(self, Re_p, Pr, k_f):
         """
-        填充床壁面传热系数 (Martin-Nilles关联式)。
+        濉厖搴婂闈紶鐑郴鏁?(Martin-Nilles鍏宠仈寮?銆?
 
         Nu_w = (1.3 + 5/(D_h/d_p)) * (k_r,eff/k_f) + 0.19 * Re_p^0.75 * Pr^(1/3)
 
-        该关联式在低D_h/d_p比(壁面效应主导)时仍有效。
+        璇ュ叧鑱斿紡鍦ㄤ綆D_h/d_p姣?澹侀潰鏁堝簲涓诲)鏃朵粛鏈夋晥銆?
 
         Parameters
         ----------
         Re_p : float
-            颗粒Reynolds数
+            棰楃矑Reynolds鏁?
         Pr : float
-            Prandtl数
+            Prandtl鏁?
         k_f : float
-            流体导热系数 [W/m·K]
+            娴佷綋瀵肩儹绯绘暟 [W/m路K]
 
         Returns
         -------
         h_w : float
-            壁面传热系数 [W/m²·K]
+            澹侀潰浼犵儹绯绘暟 [W/m虏路K]
         Nu_w : float
-            壁面Nusselt数 (基于d_p)
+            澹侀潰Nusselt鏁?(鍩轰簬d_p)
         """
         k_r_eff = self.effective_conductivity_total(k_f, Re_p, Pr)
         ratio_k = k_r_eff / k_f
-        ratio_D = max(self.N_ratio, 1.5)  # 避免除以过小值
+        ratio_D = max(self.N_ratio, 1.5)  # 閬垮厤闄や互杩囧皬鍊?
 
         # Martin-Nilles
         Nu_w = (1.3 + 5.0 / ratio_D) * ratio_k + 0.19 * Re_p**0.75 * Pr**(1.0 / 3.0)
@@ -360,22 +387,22 @@ class PackedBedTPMSModel:
         return h_w, Nu_w
 
     # ================================================================
-    # 3. TPMS 翅片增强
+    # 3. TPMS 缈呯墖澧炲己
     # ================================================================
 
     def tpms_fin_efficiency(self, h_local):
         """
         Fin efficiency for TPMS or PlateFin channels.
 
-        For TPMS: models the TPMS wall as a fin of length L_fin ≈ D_h/4.
-        For PlateFin: uses the perforated-fin formulas (Wang et al. 2024, Eqs. 10–12):
-            η_f = tanh(m·Hf)/(m·Hf),  m = sqrt(2h/(k_wall·tf))
-            η_h = 1 − (Af/Ah)·(1 − η_f)
+        For TPMS: models the TPMS wall as a fin of length L_fin 鈮?D_h/4.
+        For PlateFin: uses the perforated-fin formulas (Wang et al. 2024, Eqs. 10鈥?2):
+            畏_f = tanh(m路Hf)/(m路Hf),  m = sqrt(2h/(k_wall路tf))
+            畏_h = 1 鈭?(Af/Ah)路(1 鈭?畏_f)
 
         Parameters
         ----------
         h_local : float
-            Local convective HTC [W/m²·K]
+            Local convective HTC [W/m虏路K]
 
         Returns
         -------
@@ -386,7 +413,7 @@ class PackedBedTPMSModel:
             return 1.0
 
         if self.fin_height_for_eff is not None:
-            # PlateFin: Eqs. 11–12 for η_f, then Eq. 10 for η_h
+            # PlateFin: Eqs. 11鈥?2 for 畏_f, then Eq. 10 for 畏_h
             Hf = self.fin_height_for_eff
             m  = np.sqrt(2.0 * h_local / (self.k_wall * self.t_wall))
             mL = m * Hf
@@ -410,34 +437,94 @@ class PackedBedTPMSModel:
             else:
                 return np.tanh(mL) / mL
 
-    # ================================================================
-    # 4. 综合壁面传热系数 (含区间估计)
-    # ================================================================
+    @staticmethod
+    def _normalize_phi_structure_name(tpms_type):
+        name = str(tpms_type or "").strip()
+        if name in ("Plate", "PlateFin", "SmoothPlateFin"):
+            return "Plate"
+        return name
 
-    def overall_htc_dixon(self, Re_p, Pr, k_f, mode='nominal', Nu_w0=20.0, T=None):
+    def hydraulic_enhancement_phi(self, tpms_type, Re_channel):
         """
-        Dixon热阻模型综合传热系数 (Eqs 0.1, 0.2):
-            1/h_i = 1/h_w + (D_h/(6·k_r))·(Bi+3)/(Bi+4)
-            Bi = h_w·D_h / (2·k_r)
+        Hydraulic enhancement factor from Chapter 3 fit: f = A*Re^b.
+        """
+        if self.phi_source != 'ch3_f_re_fit':
+            return 1.0
 
-        D_h (TPMS通道水力直径) 作为 Dixon公式中的管内径 d_i。
-        三档模式仅通过TPMS翅片面积增强系数区分 (与现有模型一致)。
+        tpms_key = self._normalize_phi_structure_name(tpms_type)
+        if tpms_key == "Plate":
+            return 1.0
+
+        coeff_tpms = _CH3_F_RE_COEFFS.get(tpms_key)
+        coeff_plate = _CH3_F_RE_COEFFS.get("Plate")
+        if coeff_tpms is None or coeff_plate is None:
+            return 1.0
+
+        re_safe = max(float(Re_channel), 1e-6)
+        a_t, b_t = coeff_tpms
+        a_p, b_p = coeff_plate
+        phi = (a_t / a_p) * (re_safe ** (b_t - b_p))
+        return float(max(phi, 1.0))
+
+    def _ht_enhancement_bounds(self, phi_value):
+        phi = max(float(phi_value), 1.0)
+        lower = 1.0
+        upper = phi
+        if self.ht_nominal_rule == 'arithmetic':
+            nominal = 0.5 * (lower + upper)
+        else:
+            nominal = np.sqrt(phi)
+        return lower, nominal, upper
+
+    def _ht_enhancement_factor(self, mode, phi_value):
+        """
+        Returns (lower, nominal, upper, used_factor) for traceability.
+        """
+        mode = str(mode).strip().lower()
+        lower, nominal, upper = self._ht_enhancement_bounds(phi_value)
+        if self.ht_enhancement_model != 'from_phi':
+            return lower, nominal, upper, 1.0
+        if mode == 'lower':
+            used = lower
+        elif mode == 'upper':
+            used = upper
+        else:
+            used = nominal
+        return lower, nominal, upper, used
+
+    # ================================================================
+    # 4. 缁煎悎澹侀潰浼犵儹绯绘暟 (鍚尯闂翠及璁?
+    # ================================================================
+
+    def overall_htc_dixon(self, Re_p, Pr, k_f, mode='nominal', Nu_w0=20.0, T=None,
+                          phi_value=1.0):
+        """
+        Dixon鐑樆妯″瀷缁煎悎浼犵儹绯绘暟 (Eqs 0.1, 0.2):
+            1/h_i = 1/h_w + (D_h/(6路k_r))路(Bi+3)/(Bi+4)
+            Bi = h_w路D_h / (2路k_r)
+
+        D_h (TPMS閫氶亾姘村姏鐩村緞) 浣滀负 Dixon鍏紡涓殑绠″唴寰?d_i銆?
+        涓夋。妯″紡浠呴€氳繃TPMS缈呯墖闈㈢Н澧炲己绯绘暟鍖哄垎 (涓庣幇鏈夋ā鍨嬩竴鑷?銆?
 
         Parameters
         ----------
-        Re_p : float    颗粒Reynolds数
-        Pr : float      Prandtl数
-        k_f : float     流体导热系数 [W/m·K]
+        Re_p : float    棰楃矑Reynolds鏁?
+        Pr : float      Prandtl鏁?
+        k_f : float     娴佷綋瀵肩儹绯绘暟 [W/m路K]
         mode : str      'lower', 'nominal', 'upper'
-        Nu_w0 : float   无流量壁面Nusselt数基值 (默认20)
-        T : float, optional  温度 [K]
+        Nu_w0 : float   鏃犳祦閲忓闈usselt鏁板熀鍊?(榛樿20)
+        T : float, optional  娓╁害 [K]
 
         Returns
         -------
-        h_i : float     综合传热系数 [W/m²·K]
-        details : dict  热阻分解及中间量
+        h_i : float     缁煎悎浼犵儹绯绘暟 [W/m虏路K]
+        details : dict  鐑樆鍒嗚В鍙婁腑闂撮噺
         """
-        h_w, Nu_w = self.wall_htc_dixon(Re_p, Pr, k_f, Nu_w0)
+        enh_lower, enh_nominal, enh_upper, enh_used = self._ht_enhancement_factor(mode, phi_value)
+
+        h_w_raw, Nu_w_raw = self.wall_htc_dixon(Re_p, Pr, k_f, Nu_w0)
+        h_w = h_w_raw * enh_used
+        Nu_w = Nu_w_raw * enh_used
         k_r = self.effective_conductivity_dixon(k_f, Re_p, Pr, T)
 
         d_i = self.D_h  # hydraulic diameter: for Bi, Nu_w, and R_bed conduction path
@@ -445,12 +532,12 @@ class PackedBedTPMSModel:
         R_w = 1.0 / h_w
         R_bed = (d_i / (6.0 * k_r)) * (Bi + 3.0) / (Bi + 4.0)
 
-        # Pure Dixon HTC referenced to Abase = width × length [W/m²·K]
+        # Pure Dixon HTC referenced to Abase = width 脳 length [W/m虏路K]
         h_pure = 1.0 / (R_w + R_bed)
 
-        # 使用单根翅片效率 η_f (非 η_h), 与 q=Abase*(1+Afin/Abase*η_f)*h*dt 一致
+        # 浣跨敤鍗曟牴缈呯墖鏁堢巼 畏_f (闈?畏_h), 涓?q=Abase*(1+Afin/Abase*畏_f)*h*dt 涓€鑷?
         if self.fin_height_for_eff is not None:
-            # PlateFin: compute η_f directly (tpms_fin_efficiency returns η_h for PlateFin)
+            # PlateFin: compute 畏_f directly (tpms_fin_efficiency returns 畏_h for PlateFin)
             _m  = np.sqrt(2.0 * h_pure / max(self.k_wall * self.t_wall, 1e-30))
             _mL = _m * self.fin_height_for_eff
             if _mL < 0.01:
@@ -460,7 +547,7 @@ class PackedBedTPMSModel:
             else:
                 eta_fin = np.tanh(_mL) / _mL
         else:
-            # TPMS: tpms_fin_efficiency returns η_f directly
+            # TPMS: tpms_fin_efficiency returns 畏_f directly
             eta_fin = self.tpms_fin_efficiency(h_pure)
 
         # q = Abase * (1 + Afin/Abase * eta) * h_pure * dt
@@ -480,7 +567,9 @@ class PackedBedTPMSModel:
 
         details = {
             'htc_model': 'dixon',
+            'h_w_raw': h_w_raw,
             'h_w': h_w,
+            'Nu_w_raw': Nu_w_raw,
             'Nu_w': Nu_w,
             'k_r_stagnant': self.effective_conductivity_dixon_stagnant(k_f, T),
             'k_r': k_r,
@@ -495,42 +584,49 @@ class PackedBedTPMSModel:
             'h_eff': h_i,
             'mode': mode,
             'D_h_over_d_p': self.N_ratio,
+            'phi': float(max(phi_value, 1.0)),
+            'enh_lower': enh_lower,
+            'enh_nominal': enh_nominal,
+            'enh_upper': enh_upper,
+            'enh_used': enh_used,
+            'ht_enhancement_model': self.ht_enhancement_model,
         }
         return h_i, details
 
     def overall_htc_packed_side(self, Re_p, Pr, k_f, mode='nominal',
-                                htc_model='martin_nilles', T=None):
+                                htc_model='martin_nilles', T=None,
+                                phi_value=1.0):
         """
-        填充床侧的综合有效传热系数。
+        濉厖搴婁晶鐨勭患鍚堟湁鏁堜紶鐑郴鏁般€?
 
-        双区域模型: 1/h_eff = 1/h_w + D_h / (C_shape * k_r,eff)
+        鍙屽尯鍩熸ā鍨? 1/h_eff = 1/h_w + D_h / (C_shape * k_r,eff)
 
-        三种模式提供不确定性区间:
-        - 'lower':  保守估计 (标准圆管, 无TPMS增强)
-        - 'nominal': 最佳估计 (TPMS中等增强)
-        - 'upper':  乐观估计 (完全TPMS增强)
+        涓夌妯″紡鎻愪緵涓嶇‘瀹氭€у尯闂?
+        - 'lower':  淇濆畧浼拌 (鏍囧噯鍦嗙, 鏃燭PMS澧炲己)
+        - 'nominal': 鏈€浣充及璁?(TPMS涓瓑澧炲己)
+        - 'upper':  涔愯浼拌 (瀹屽叏TPMS澧炲己)
 
         Parameters
         ----------
         Re_p : float
-            颗粒Reynolds数
+            棰楃矑Reynolds鏁?
         Pr : float
-            Prandtl数
+            Prandtl鏁?
         k_f : float
-            流体导热系数 [W/m·K]
+            娴佷綋瀵肩儹绯绘暟 [W/m路K]
         mode : str
             'lower', 'nominal', 'upper'
         htc_model : str
-            'martin_nilles' (默认) 或 'dixon'
+            'martin_nilles' (榛樿) 鎴?'dixon'
         T : float, optional
-            温度 [K]
+            娓╁害 [K]
 
         Returns
         -------
         h_eff : float
-            有效传热系数 [W/m²·K]
+            鏈夋晥浼犵儹绯绘暟 [W/m虏路K]
         details : dict
-            热阻分解细节
+            鐑樆鍒嗚В缁嗚妭
         """
         mode = str(mode).strip().lower()
         if mode not in SUPPORTED_PACKED_MODES:
@@ -538,30 +634,36 @@ class PackedBedTPMSModel:
                 f"Invalid packed mode '{mode}'. Use one of {SUPPORTED_PACKED_MODES}."
             )
 
-        # --- Dixon 模型分发 ---
+        # --- Dixon 妯″瀷鍒嗗彂 ---
         if str(htc_model).strip().lower() == 'dixon':
-            return self.overall_htc_dixon(Re_p, Pr, k_f, mode=mode, T=T)
+            return self.overall_htc_dixon(
+                Re_p, Pr, k_f, mode=mode, T=T, phi_value=phi_value
+            )
 
-        # --- Wang experiment 模型分发 ---
+        # --- Wang experiment 妯″瀷鍒嗗彂 ---
+        enh_lower, enh_nominal, enh_upper, enh_used = self._ht_enhancement_factor(mode, phi_value)
         if str(htc_model).strip().lower() == 'wang_experiment':
-            h_w, Nu_w = self.wall_htc_wang_experiment(Re_p, Pr, k_f)
+            h_w_raw, Nu_w_raw = self.wall_htc_wang_experiment(Re_p, Pr, k_f)
             k_r_eff = self.effective_conductivity_total(k_f, Re_p, Pr, T)
             # Continue with Martin-Nilles thermal resistance model
         else:
-            # --- Martin-Nilles 模型 (默认) ---
-            h_w, Nu_w = self.wall_htc_packed_bed(Re_p, Pr, k_f)
+            # --- Martin-Nilles 妯″瀷 (榛樿) ---
+            h_w_raw, Nu_w_raw = self.wall_htc_packed_bed(Re_p, Pr, k_f)
             k_r_eff = self.effective_conductivity_total(k_f, Re_p, Pr, T)
 
-        # 模式相关参数
-        # TPMS增强体现在两个方面:
-        # 1. C_shape: 几何因子 (TPMS缩短导热路径 → 更小的C, lower/nominal/upper: 8/6/4)
-        # 2. 翅片面积增强: q = Abase*(1 + Afin/Abase*η_f)*h_pure*dt
-        #    η_f = tanh(mHf)/(mHf)  (单根翅片效率, 非整体面效率η_h)
-        #    Afin/Abase 由几何精确计算: PlateFin=(2Hf-tf)/sf, TPMS=SAD*H
+        h_w = h_w_raw * enh_used
+        Nu_w = Nu_w_raw * enh_used
 
-        # 使用单根翅片效率 η_f (非 η_h=1-Af/Ah*(1-η_f))
+        # 妯″紡鐩稿叧鍙傛暟
+        # TPMS澧炲己浣撶幇鍦ㄤ袱涓柟闈?
+        # 1. C_shape: 鍑犱綍鍥犲瓙 (TPMS缂╃煭瀵肩儹璺緞 鈫?鏇村皬鐨凜, lower/nominal/upper: 8/6/4)
+        # 2. 缈呯墖闈㈢Н澧炲己: q = Abase*(1 + Afin/Abase*畏_f)*h_pure*dt
+        #    畏_f = tanh(mHf)/(mHf)  (鍗曟牴缈呯墖鏁堢巼, 闈炴暣浣撻潰鏁堢巼畏_h)
+        #    Afin/Abase 鐢卞嚑浣曠簿纭绠? PlateFin=(2Hf-tf)/sf, TPMS=SAD*H
+
+        # 浣跨敤鍗曟牴缈呯墖鏁堢巼 畏_f (闈?畏_h=1-Af/Ah*(1-畏_f))
         if self.fin_height_for_eff is not None:
-            # PlateFin: compute η_f directly from fin geometry
+            # PlateFin: compute 畏_f directly from fin geometry
             _m   = np.sqrt(2.0 * h_w / max(self.k_wall * self.t_wall, 1e-30))
             _mL  = _m * self.fin_height_for_eff
             if _mL < 0.01:
@@ -571,24 +673,24 @@ class PackedBedTPMSModel:
             else:
                 eta_fin = np.tanh(_mL) / _mL
         else:
-            # TPMS: tpms_fin_efficiency already returns η_f for TPMS
+            # TPMS: tpms_fin_efficiency already returns 畏_f for TPMS
             eta_fin = self.tpms_fin_efficiency(h_w)
 
         if mode == 'lower':
-            C_shape = 8.0      # 圆管几何 (最长导热路径)
+            C_shape = 8.0      # 鍦嗙鍑犱綍 (鏈€闀垮鐑矾寰?
         elif mode == 'nominal':
-            C_shape = 6.0      # TPMS中间值
+            C_shape = 6.0      # TPMS涓棿鍊?
         else:  # upper
-            C_shape = 4.0      # 短导热路径
+            C_shape = 4.0      # 鐭鐑矾寰?
 
         k_r_adj = k_r_eff  # No k_enhance; TPMS flow redistribution captured via C_shape
 
-        # 热阻
+        # 鐑樆
         R_wall_film = 1.0 / h_w
         R_bed_cond = self.D_h / (C_shape * k_r_adj)
         R_total = R_wall_film + R_bed_cond
 
-        # Pure HTC referenced to Abase = width × length [W/m²·K]
+        # Pure HTC referenced to Abase = width 脳 length [W/m虏路K]
         h_pure = 1.0 / R_total
 
         # q = Abase * (1 + Afin/Abase * eta) * h_pure * dt
@@ -602,7 +704,9 @@ class PackedBedTPMSModel:
         area_factor = h_eff / max(h_pure, 1e-30)   # for traceability
 
         details = {
+            'h_w_raw': h_w_raw,
             'h_w': h_w,
+            'Nu_w_raw': Nu_w_raw,
             'Nu_w': Nu_w,
             'k_eff_stagnant': self.effective_conductivity_stagnant(k_f, T),
             'k_r_eff': k_r_eff,
@@ -618,31 +722,37 @@ class PackedBedTPMSModel:
             'h_eff': h_eff,
             'mode': mode,
             'D_h_over_d_p': self.N_ratio,
+            'phi': float(max(phi_value, 1.0)),
+            'enh_lower': enh_lower,
+            'enh_nominal': enh_nominal,
+            'enh_upper': enh_upper,
+            'enh_used': enh_used,
+            'ht_enhancement_model': self.ht_enhancement_model,
         }
         return h_eff, details
 
     # ================================================================
-    # 5. 压降模型
+    # 5. 鍘嬮檷妯″瀷
     # ================================================================
 
     def friction_factor_ergun(self, Re_p):
         """
-        Ergun方程等效摩擦因子。
+        Ergun鏂圭▼绛夋晥鎽╂摝鍥犲瓙銆?
 
-        转换为与现有求解器兼容的Fanning摩擦因子格式:
-        dP = f_equiv * (L/D_h) * (ρ*u²/2)
+        杞崲涓轰笌鐜版湁姹傝В鍣ㄥ吋瀹圭殑Fanning鎽╂摝鍥犲瓙鏍煎紡:
+        dP = f_equiv * (L/D_h) * (蟻*u虏/2)
 
-        其中 u 为TPMS通道内的表观速度 (= m_dot / (ρ * Ac_TPMS))
+        鍏朵腑 u 涓篢PMS閫氶亾鍐呯殑琛ㄨ閫熷害 (= m_dot / (蟻 * Ac_TPMS))
 
         Parameters
         ----------
         Re_p : float
-            颗粒Reynolds数 = ρ*u_s*d_p/μ
+            棰楃矑Reynolds鏁?= 蟻*u_s*d_p/渭
 
         Returns
         -------
         f_equiv : float
-            等效Fanning摩擦因子 [-]
+            绛夋晥Fanning鎽╂摝鍥犲瓙 [-]
         """
         eps = self.eps_bed
         f_equiv = (self.D_h / self.d_p) * (1.0 - eps) / eps**3 * (
@@ -652,21 +762,21 @@ class PackedBedTPMSModel:
 
     def pressure_drop_ergun(self, rho, mu, u_s, L):
         """
-        Ergun方程直接计算压降。
+        Ergun鏂圭▼鐩存帴璁＄畻鍘嬮檷銆?
 
-        ΔP/L = 150*μ*u_s*(1-ε)² / (ε³*d_p²) + 1.75*ρ*u_s²*(1-ε) / (ε³*d_p)
+        螖P/L = 150*渭*u_s*(1-蔚)虏 / (蔚鲁*d_p虏) + 1.75*蟻*u_s虏*(1-蔚) / (蔚鲁*d_p)
 
         Parameters
         ----------
-        rho : float  流体密度 [kg/m³]
-        mu : float   动力粘度 [Pa·s]
-        u_s : float  表观速度 [m/s]
-        L : float    床层长度 [m]
+        rho : float  娴佷綋瀵嗗害 [kg/m鲁]
+        mu : float   鍔ㄥ姏绮樺害 [Pa路s]
+        u_s : float  琛ㄨ閫熷害 [m/s]
+        L : float    搴婂眰闀垮害 [m]
 
         Returns
         -------
-        dP : float       总压降 [Pa]
-        breakdown : dict  粘性/惯性项分解
+        dP : float       鎬诲帇闄?[Pa]
+        breakdown : dict  绮樻€?鎯€ч」鍒嗚В
         """
         eps = self.eps_bed
         d_p_eff = self.d_p * self.sphericity
@@ -685,23 +795,23 @@ class PackedBedTPMSModel:
     @staticmethod
     def tpms_pressure_correction(tpms_type):
         """
-        TPMS对填充床压降的校正因子。
+        TPMS瀵瑰～鍏呭簥鍘嬮檷鐨勬牎姝ｅ洜瀛愩€?
 
-        不同TPMS骨架对流道的宏观扭曲程度不同(第三章结论),
-        导致相同填充床在不同TPMS中的压降存在差异。
-        此校正因子乘以Ergun基础压降。
+        涓嶅悓TPMS楠ㄦ灦瀵规祦閬撶殑瀹忚鎵洸绋嬪害涓嶅悓(绗笁绔犵粨璁?,
+        瀵艰嚧鐩稿悓濉厖搴婂湪涓嶅悓TPMS涓殑鍘嬮檷瀛樺湪宸紓銆?
+        姝ゆ牎姝ｅ洜瀛愪箻浠rgun鍩虹鍘嬮檷銆?
 
-        数值来源: 基于第三章实验趋势的估计值。
+        鏁板€兼潵婧? 鍩轰簬绗笁绔犲疄楠岃秼鍔跨殑浼拌鍊笺€?
 
         Parameters
         ----------
         tpms_type : str
-            TPMS类型
+            TPMS绫诲瀷
 
         Returns
         -------
         psi : float
-            校正因子 [-], >= 1.0
+            鏍℃鍥犲瓙 [-], >= 1.0
         """
         corrections = {
             'Gyroid': 1.15,
@@ -714,43 +824,43 @@ class PackedBedTPMSModel:
         return corrections.get(tpms_type, 1.15)
 
     # ================================================================
-    # 6. 统一接口 (兼容现有求解器)
+    # 6. 缁熶竴鎺ュ彛 (鍏煎鐜版湁姹傝В鍣?
     # ================================================================
 
     def get_htc_and_friction(self, Re_channel, Pr, k_f, tpms_type='Diamond',
                              mode='nominal', htc_model='martin_nilles', T=None):
         """
-        统一接口: 返回有效传热系数和等效摩擦因子。
+        缁熶竴鎺ュ彛: 杩斿洖鏈夋晥浼犵儹绯绘暟鍜岀瓑鏁堟懇鎿﹀洜瀛愩€?
 
-        将通道Re自动转换为颗粒Re, 并应用TPMS压降校正。
+        灏嗛€氶亾Re鑷姩杞崲涓洪绮扲e, 骞跺簲鐢═PMS鍘嬮檷鏍℃銆?
 
         Parameters
         ----------
         Re_channel : float
-            基于TPMS通道水力直径的Reynolds数
+            鍩轰簬TPMS閫氶亾姘村姏鐩村緞鐨凴eynolds鏁?
         Pr : float
-            Prandtl数
+            Prandtl鏁?
         k_f : float
-            流体导热系数 [W/m·K]
+            娴佷綋瀵肩儹绯绘暟 [W/m路K]
         tpms_type : str
-            TPMS类型
+            TPMS绫诲瀷
         mode : str
-            估计模式: 'lower', 'nominal', 'upper'
+            浼拌妯″紡: 'lower', 'nominal', 'upper'
         htc_model : str
-            传热子模型: 'martin_nilles' (默认) 或 'dixon'
+            浼犵儹瀛愭ā鍨? 'martin_nilles' (榛樿) 鎴?'dixon'
         T : float, optional
-            温度 [K]
+            娓╁害 [K]
 
         Returns
         -------
         h_eff : float
-            有效传热系数 [W/m²·K]
+            鏈夋晥浼犵儹绯绘暟 [W/m虏路K]
         f_equiv : float
-            等效Fanning摩擦因子 [-]
+            绛夋晥Fanning鎽╂摝鍥犲瓙 [-]
         details : dict
-            计算细节
+            璁＄畻缁嗚妭
         """
-        # 通道Re → 颗粒Re
+        # 閫氶亾Re 鈫?棰楃矑Re
         mode = str(mode).strip().lower()
         if mode not in SUPPORTED_PACKED_MODES:
             raise ValueError(
@@ -758,51 +868,60 @@ class PackedBedTPMSModel:
             )
 
         Re_p = Re_channel * (self.d_p / self.D_h)
+        phi = self.hydraulic_enhancement_phi(tpms_type, Re_channel)
 
-        # 传热
+        # 浼犵儹
         h_eff, details = self.overall_htc_packed_side(Re_p, Pr, k_f, mode,
-                                                      htc_model=htc_model, T=T)
+                                                      htc_model=htc_model, T=T,
+                                                      phi_value=phi)
 
-        # 压降
+        # 鍘嬮檷
         f_base = self.friction_factor_ergun(Re_p)
         psi = self.tpms_pressure_correction(tpms_type)
-        f_equiv = f_base * psi
+        if self.hydraulic_model == 'phi_re_fit':
+            correction_factor = phi
+        else:
+            correction_factor = psi
+        f_equiv = f_base * correction_factor
 
         details['Re_p'] = Re_p
         details['f_ergun_base'] = f_base
         details['psi_tpms'] = psi
+        details['phi'] = phi
+        details['hydraulic_model'] = self.hydraulic_model
+        details['correction_factor'] = correction_factor
         details['f_equiv'] = f_equiv
 
         return h_eff, f_equiv, details
 
     # ================================================================
-    # 7. 区间估计
+    # 7. 鍖洪棿浼拌
     # ================================================================
 
     def interval_estimate(self, Re_p, Pr, k_f, htc_model='martin_nilles', T=None):
         """
-        返回 lower / nominal / upper 三档传热系数估计。
+        杩斿洖 lower / nominal / upper 涓夋。浼犵儹绯绘暟浼拌銆?
 
-        用于不确定性传播分析和论文中的置信区间。
+        鐢ㄤ簬涓嶇‘瀹氭€т紶鎾垎鏋愬拰璁烘枃涓殑缃俊鍖洪棿銆?
 
         Parameters
         ----------
         Re_p : float
-            颗粒Reynolds数
+            棰楃矑Reynolds鏁?
         Pr : float
-            Prandtl数
+            Prandtl鏁?
         k_f : float
-            流体导热系数 [W/m·K]
+            娴佷綋瀵肩儹绯绘暟 [W/m路K]
         htc_model : str
-            传热子模型: 'martin_nilles' (默认) 或 'dixon'
+            浼犵儹瀛愭ā鍨? 'martin_nilles' (榛樿) 鎴?'dixon'
         T : float, optional
-            温度 [K]
+            娓╁害 [K]
 
         Returns
         -------
         results : dict
             keys = 'lower', 'nominal', 'upper'
-            每项包含 h_eff 和 details
+            姣忛」鍖呭惈 h_eff 鍜?details
         """
         results = {}
         for mode in ['lower', 'nominal', 'upper']:
@@ -813,26 +932,26 @@ class PackedBedTPMSModel:
 
 
 # ====================================================================
-# 辅助函数: 从现有config生成PackedBedTPMSModel
+# 杈呭姪鍑芥暟: 浠庣幇鏈塩onfig鐢熸垚PackedBedTPMSModel
 # ====================================================================
 
 def create_packed_bed_model(config, stream_key='hot',
                             cell_size_override=None, t_wall_override=None):
     """
-    从现有换热器config字典创建PackedBedTPMSModel实例。
+    浠庣幇鏈夋崲鐑櫒config瀛楀吀鍒涘缓PackedBedTPMSModel瀹炰緥銆?
 
-    在config中需添加 'catalyst' 部分:
+    鍦╟onfig涓渶娣诲姞 'catalyst' 閮ㄥ垎:
         config['catalyst'] = {
             'particle_diameter': 1e-3,    # [m]
             'bed_porosity': 0.40,         # [-]
-            'k_solid': 10.0,              # [W/m·K]
+            'k_solid': 10.0,              # [W/m路K]
             'shape_factor': 1.0,          # [-]
         }
 
     Parameters
     ----------
     config : dict
-        换热器配置字典
+        鎹㈢儹鍣ㄩ厤缃瓧鍏?
 
     Returns
     -------
@@ -848,7 +967,14 @@ def create_packed_bed_model(config, stream_key='hot',
         'particle_diameter': packed_cfg.get('particle_diameter', cat.get('particle_diameter', 1e-3)),
         'bed_porosity': packed_cfg.get('bed_porosity', cat.get('bed_porosity', 0.40)),
         'k_solid': packed_cfg.get('k_solid', cat.get('k_solid', 10.0)),
+        'k_solid_material': packed_cfg.get('k_solid_material', cat.get('k_solid_material', None)),
         'shape_factor': packed_cfg.get('shape_factor', cat.get('shape_factor', 1.0)),
+        'hydraulic_model': packed_cfg.get('hydraulic_model', cat.get('hydraulic_model', 'psi_legacy')),
+        'phi_source': packed_cfg.get('phi_source', cat.get('phi_source', 'ch3_f_re_fit')),
+        'ht_enhancement_model': packed_cfg.get(
+            'ht_enhancement_model', cat.get('ht_enhancement_model', 'off')
+        ),
+        'ht_nominal_rule': packed_cfg.get('ht_nominal_rule', cat.get('ht_nominal_rule', 'geometric')),
     }
 
     geo = config['geometry']
@@ -897,10 +1023,10 @@ def create_packed_bed_model(config, stream_key='hot',
         t_wall_eff = t_wall_override if t_wall_override is not None else _wall_default
         fin_height_eff = None
         Af_Ah_ratio    = None
-        # Afin/Abase: SAD × channel height (TPMS ligaments act as fins on the base plate)
+        # Afin/Abase: SAD 脳 channel height (TPMS ligaments act as fins on the base plate)
         alpha = config.get('channels', {}).get(stream_key, {}).get('surface_area_density', 0.0)
         H_ch  = float(ch_geo_raw.get('height') or geo.get('height', 0.25))
-        Afin_Abase_ratio = alpha * H_ch   # [1/m] × [m] = dimensionless
+        Afin_Abase_ratio = alpha * H_ch   # [1/m] 脳 [m] = dimensionless
 
     tpms_geometry = {
         'D_h':             D_h,
@@ -915,44 +1041,44 @@ def create_packed_bed_model(config, stream_key='hot',
 
 
 # ====================================================================
-# 自检与验证
+# 鑷涓庨獙璇?
 # ====================================================================
 
 def test_packed_bed_model():
-    """模型自检: 打印典型工况下的计算结果。"""
+    """Model self-check: print representative calculation results."""
     print("=" * 70)
     print("Packed Bed + TPMS Combined Model - Self Test")
     print("=" * 70)
 
-    # 典型低温氢液化工况参数
+    # 鍏稿瀷浣庢俯姘㈡恫鍖栧伐鍐靛弬鏁?
     catalyst_config = {
         'particle_diameter': 1.0e-3,   # 1 mm
         'bed_porosity': 0.40,
-        'k_solid': 10.0,               # Fe2O3/Al2O3 类催化剂
+        'k_solid': 10.0,               # Fe2O3/Al2O3 绫诲偓鍖栧墏
         'shape_factor': 1.0,
     }
     tpms_geometry = {
-        'D_h': 3.3e-3,                 # 典型 TPMS D_h (cell=5mm, ε=0.65)
+        'D_h': 3.3e-3,                 # 鍏稿瀷 TPMS D_h (cell=5mm, 蔚=0.65)
         'wall_thickness': 0.5e-3,
-        'k_wall': 237.0,               # 铝
+        'k_wall': 237.0,               # 閾?
     }
 
     model = PackedBedTPMSModel(catalyst_config, tpms_geometry)
     print(f"\nD_h/d_p = {model.N_ratio:.1f}")
 
-    # 低温氢气典型物性 (T≈50K, P≈2MPa)
-    k_f = 0.10     # W/m·K
+    # 浣庢俯姘㈡皵鍏稿瀷鐗╂€?(T鈮?0K, P鈮?MPa)
+    k_f = 0.10     # W/m路K
     Pr = 0.80
-    mu = 3e-6      # Pa·s
-    rho = 3.0      # kg/m³
+    mu = 3e-6      # Pa路s
+    rho = 3.0      # kg/m鲁
 
     print(f"\nFluid: k_f={k_f} W/m-K, Pr={Pr}, mu={mu:.1e} Pa-s, rho={rho} kg/m3")
 
-    # --- 有效导热 ---
+    # --- 鏈夋晥瀵肩儹 ---
     k_0 = model.effective_conductivity_stagnant(k_f)
     print(f"\nStagnant k_eff,0 = {k_0:.4f} W/m-K  (k_eff,0/k_f = {k_0/k_f:.2f})")
 
-    # --- Re扫描 ---
+    # --- Re鎵弿 ---
     print(f"\n{'Re_p':>6} | {'h_lower':>10} {'h_nominal':>10} {'h_upper':>10} | {'f_equiv':>10}")
     print("-" * 65)
 
@@ -967,16 +1093,16 @@ def test_packed_bed_model():
             f"{f_eq:10.1f}"
         )
 
-    # --- 压降对比 ---
+    # --- 鍘嬮檷瀵规瘮 ---
     u_s = 0.5  # m/s
     dP, breakdown = model.pressure_drop_ergun(rho, mu, u_s, L=1.0)
-    print(f"\n压降 (u_s={u_s} m/s, L=1m):")
-    print(f"  粘性项: {breakdown['dP_viscous']:.0f} Pa")
-    print(f"  惯性项: {breakdown['dP_inertial']:.0f} Pa")
-    print(f"  总计:   {dP:.0f} Pa  ({dP/1e3:.2f} kPa)")
+    print(f"\n鍘嬮檷 (u_s={u_s} m/s, L=1m):")
+    print(f"  绮樻€ч」: {breakdown['dP_viscous']:.0f} Pa")
+    print(f"  鎯€ч」: {breakdown['dP_inertial']:.0f} Pa")
+    print(f"  鎬昏:   {dP:.0f} Pa  ({dP/1e3:.2f} kPa)")
 
-    # --- 统一接口测试 (Martin-Nilles) ---
-    print(f"\n--- 统一接口 Martin-Nilles (Re_channel=1000) ---")
+    # --- 缁熶竴鎺ュ彛娴嬭瘯 (Martin-Nilles) ---
+    print(f"\n--- 缁熶竴鎺ュ彛 Martin-Nilles (Re_channel=1000) ---")
     for mode in ['lower', 'nominal', 'upper']:
         h_eff, f_eff, det = model.get_htc_and_friction(
             Re_channel=1000, Pr=Pr, k_f=k_f,
@@ -985,14 +1111,14 @@ def test_packed_bed_model():
         print(f"  {mode:8s}: h_eff={h_eff:8.1f} W/m2K, f_equiv={f_eff:8.1f}, "
               f"Re_p={det['Re_p']:.1f}, eta_fin={det['eta_fin']:.3f}")
 
-    # --- Dixon 模型: 静态导热系数验证 ---
+    # --- Dixon 妯″瀷: 闈欐€佸鐑郴鏁伴獙璇?---
     print(f"\n--- Dixon k_r^0 vs ZBS k_eff,0 ---")
     k_r0_dixon = model.effective_conductivity_dixon_stagnant(k_f)
     k_r0_zbs = model.effective_conductivity_stagnant(k_f)
     print(f"  Dixon k_r^0 = {k_r0_dixon:.4f} W/m-K  (k_r^0/k_f = {k_r0_dixon/k_f:.2f})")
     print(f"  ZBS   k_0   = {k_r0_zbs:.4f} W/m-K  (k_0/k_f   = {k_r0_zbs/k_f:.2f})")
 
-    # --- Dixon vs Martin-Nilles Re扫描对比 ---
+    # --- Dixon vs Martin-Nilles Re鎵弿瀵规瘮 ---
     print(f"\n{'Re_p':>6} | {'MN-lower':>10} {'MN-nom':>10} {'MN-upper':>10}"
           f" | {'DX-lower':>10} {'DX-nom':>10} {'DX-upper':>10}")
     print("-" * 80)
@@ -1009,8 +1135,8 @@ def test_packed_bed_model():
             f"{res_dx['upper']['h_eff']:10.1f}"
         )
 
-    # --- Dixon 热阻分解细节 (Re_p=100, nominal) ---
-    print(f"\n--- Dixon 热阻分解 (Re_p=100, nominal) ---")
+    # --- Dixon 鐑樆鍒嗚В缁嗚妭 (Re_p=100, nominal) ---
+    print(f"\n--- Dixon 鐑樆鍒嗚В (Re_p=100, nominal) ---")
     _, det_dx = model.overall_htc_dixon(100, Pr, k_f, mode='nominal')
     print(f"  Nu_w         = {det_dx['Nu_w']:.2f}")
     print(f"  h_w          = {det_dx['h_w']:.1f} W/m2K")
@@ -1028,3 +1154,4 @@ def test_packed_bed_model():
 
 if __name__ == "__main__":
     test_packed_bed_model()
+

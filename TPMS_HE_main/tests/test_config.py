@@ -87,3 +87,35 @@ def test_normalize_config_idempotent():
     cfg2 = normalize_config(cfg1)
     # Key structure preserved on second call
     assert set(cfg1.keys()) == set(cfg2.keys())
+
+
+def test_default_packed_contains_new_model_controls():
+    cfg = create_default_config()
+    packed = cfg["channels"]["hot"]["packed"]
+    assert packed["hydraulic_model"] == "psi_legacy"
+    assert packed["phi_source"] == "ch3_f_re_fit"
+    assert packed["ht_enhancement_model"] == "off"
+    assert packed["ht_nominal_rule"] == "geometric"
+    assert packed["kinetic_model"] == "legacy_kw"
+    assert "kinetic_params" in packed
+
+
+def test_normalize_accepts_new_packed_controls():
+    cfg = create_default_config()
+    cfg["channels"]["hot"]["packed"].update({
+        "hydraulic_model": "phi_re_fit",
+        "ht_enhancement_model": "from_phi",
+        "ht_nominal_rule": "geometric",
+        "kinetic_model": "arrhenius_first_order",
+        "kinetic_params": {
+            "Ea_J_per_mol": -336.45,
+            "a_m3s_per_mol": 2.2e-3,
+            "b_s_inv": -35.11e-3,
+        },
+    })
+    norm = normalize_config(cfg)
+    packed = norm["channels"]["hot"]["packed"]
+    assert packed["hydraulic_model"] == "phi_re_fit"
+    assert packed["ht_enhancement_model"] == "from_phi"
+    assert packed["kinetic_model"] == "arrhenius_first_order"
+    assert packed["kinetic_params"]["Ea_J_per_mol"] == pytest.approx(-336.45)

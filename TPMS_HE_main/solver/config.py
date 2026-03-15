@@ -19,10 +19,17 @@ from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelation
 SUPPORTED_CHANNEL_MODES = ("bare", "packed")
 # Packed-bed uncertainty modes
 SUPPORTED_HTC_MODELS = ('martin_nilles', 'dixon', 'wang_experiment')
+SUPPORTED_KINETIC_MODELS = ('legacy_kw', 'arrhenius_first_order')
 
 # ── Re-export for backward compatibility ───────────────────────────────────────
 # These are needed by solver/calculator.py without a cross-import
-from models.packed_bed import SUPPORTED_PACKED_MODES  # noqa: E402
+from models.packed_bed import (
+    SUPPORTED_PACKED_MODES,
+    SUPPORTED_HYDRAULIC_MODELS,
+    SUPPORTED_PHI_SOURCES,
+    SUPPORTED_HT_ENHANCEMENT_MODELS,
+    SUPPORTED_HT_NOMINAL_RULES,
+)  # noqa: E402
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -74,9 +81,24 @@ def _normalize_single_channel(cfg, stream_key):
         "k_solid_material": cat.get("k_solid_material", None),
         "shape_factor": cat.get("shape_factor", 1.0),
         "mode": cat.get("mode", "nominal"),
+        "hydraulic_model": cat.get("hydraulic_model", "psi_legacy"),
+        "phi_source": cat.get("phi_source", "ch3_f_re_fit"),
+        "ht_enhancement_model": cat.get("ht_enhancement_model", "off"),
+        "ht_nominal_rule": cat.get("ht_nominal_rule", "geometric"),
+        "kinetic_model": cat.get("kinetic_model", "legacy_kw"),
     }
+    kinetic_params_defaults = {
+        "Ea_J_per_mol": -336.45,
+        "a_m3s_per_mol": 2.2e-3,
+        "b_s_inv": -35.11e-3,
+    }
+    kinetic_params_defaults.update(cat.get("kinetic_params", {}))
+
     packed_cfg = copy.deepcopy(packed_defaults)
     packed_cfg.update(ch_cfg.get("packed", {}))
+    kinetic_params = copy.deepcopy(kinetic_params_defaults)
+    kinetic_params.update((ch_cfg.get("packed", {}) or {}).get("kinetic_params", {}))
+    packed_cfg["kinetic_params"] = kinetic_params
 
     packed_mode = str(packed_cfg.get("mode", "nominal")).strip().lower()
     if packed_mode not in SUPPORTED_PACKED_MODES:
@@ -93,6 +115,55 @@ def _normalize_single_channel(cfg, stream_key):
             f"Use one of {SUPPORTED_HTC_MODELS}."
         )
     packed_cfg["htc_model"] = htc_model
+
+    hydraulic_model = str(packed_cfg.get("hydraulic_model", "psi_legacy")).strip().lower()
+    if hydraulic_model not in SUPPORTED_HYDRAULIC_MODELS:
+        raise ValueError(
+            f"Invalid hydraulic_model '{hydraulic_model}' for '{stream_key}'. "
+            f"Use one of {SUPPORTED_HYDRAULIC_MODELS}."
+        )
+    packed_cfg["hydraulic_model"] = hydraulic_model
+
+    phi_source = str(packed_cfg.get("phi_source", "ch3_f_re_fit")).strip().lower()
+    if phi_source not in SUPPORTED_PHI_SOURCES:
+        raise ValueError(
+            f"Invalid phi_source '{phi_source}' for '{stream_key}'. "
+            f"Use one of {SUPPORTED_PHI_SOURCES}."
+        )
+    packed_cfg["phi_source"] = phi_source
+
+    ht_enhancement_model = str(
+        packed_cfg.get("ht_enhancement_model", "off")
+    ).strip().lower()
+    if ht_enhancement_model not in SUPPORTED_HT_ENHANCEMENT_MODELS:
+        raise ValueError(
+            f"Invalid ht_enhancement_model '{ht_enhancement_model}' for '{stream_key}'. "
+            f"Use one of {SUPPORTED_HT_ENHANCEMENT_MODELS}."
+        )
+    packed_cfg["ht_enhancement_model"] = ht_enhancement_model
+
+    ht_nominal_rule = str(packed_cfg.get("ht_nominal_rule", "geometric")).strip().lower()
+    if ht_nominal_rule not in SUPPORTED_HT_NOMINAL_RULES:
+        raise ValueError(
+            f"Invalid ht_nominal_rule '{ht_nominal_rule}' for '{stream_key}'. "
+            f"Use one of {SUPPORTED_HT_NOMINAL_RULES}."
+        )
+    packed_cfg["ht_nominal_rule"] = ht_nominal_rule
+
+    kinetic_model = str(packed_cfg.get("kinetic_model", "legacy_kw")).strip().lower()
+    if kinetic_model not in SUPPORTED_KINETIC_MODELS:
+        raise ValueError(
+            f"Invalid kinetic_model '{kinetic_model}' for '{stream_key}'. "
+            f"Use one of {SUPPORTED_KINETIC_MODELS}."
+        )
+    packed_cfg["kinetic_model"] = kinetic_model
+
+    kp = copy.deepcopy(packed_cfg.get("kinetic_params", {}))
+    packed_cfg["kinetic_params"] = {
+        "Ea_J_per_mol": float(kp.get("Ea_J_per_mol", kinetic_params_defaults["Ea_J_per_mol"])),
+        "a_m3s_per_mol": float(kp.get("a_m3s_per_mol", kinetic_params_defaults["a_m3s_per_mol"])),
+        "b_s_inv": float(kp.get("b_s_inv", kinetic_params_defaults["b_s_inv"])),
+    }
 
     if packed_cfg["particle_diameter"] <= 0:
         raise ValueError(f"Channel '{stream_key}' packed particle_diameter must be > 0.")
@@ -312,6 +383,16 @@ def create_default_config():
                     'shape_factor': 1.0,
                     'mode': 'nominal',
                     'htc_model': 'martin_nilles',
+                    'hydraulic_model': 'psi_legacy',
+                    'phi_source': 'ch3_f_re_fit',
+                    'ht_enhancement_model': 'off',
+                    'ht_nominal_rule': 'geometric',
+                    'kinetic_model': 'legacy_kw',
+                    'kinetic_params': {
+                        'Ea_J_per_mol': -336.45,
+                        'a_m3s_per_mol': 2.2e-3,
+                        'b_s_inv': -35.11e-3,
+                    },
                 },
             },
             'cold': {
@@ -326,6 +407,16 @@ def create_default_config():
                     'shape_factor': 1.0,
                     'mode': 'nominal',
                     'htc_model': 'martin_nilles',
+                    'hydraulic_model': 'psi_legacy',
+                    'phi_source': 'ch3_f_re_fit',
+                    'ht_enhancement_model': 'off',
+                    'ht_nominal_rule': 'geometric',
+                    'kinetic_model': 'legacy_kw',
+                    'kinetic_params': {
+                        'Ea_J_per_mol': -336.45,
+                        'a_m3s_per_mol': 2.2e-3,
+                        'b_s_inv': -35.11e-3,
+                    },
                 },
             },
         },
@@ -343,6 +434,16 @@ def create_default_config():
             'shape_factor': 1.0,
             'mode': 'nominal',
             'htc_model': 'martin_nilles',
+            'hydraulic_model': 'psi_legacy',
+            'phi_source': 'ch3_f_re_fit',
+            'ht_enhancement_model': 'off',
+            'ht_nominal_rule': 'geometric',
+            'kinetic_model': 'legacy_kw',
+            'kinetic_params': {
+                'Ea_J_per_mol': -336.45,
+                'a_m3s_per_mol': 2.2e-3,
+                'b_s_inv': -35.11e-3,
+            },
         },
         'solver': {
             'n_elements': 100, 'max_iter': 500, 'tolerance': 1e-3,
@@ -439,6 +540,16 @@ def create_cpfhx_config(back_pressure_mpa=1.04, flowrate_ratio=2.7):
                     'shape_factor':      1.0,
                     'mode':             'nominal',
                     'htc_model':        'martin_nilles',
+                    'hydraulic_model':  'psi_legacy',
+                    'phi_source':       'ch3_f_re_fit',
+                    'ht_enhancement_model': 'off',
+                    'ht_nominal_rule':  'geometric',
+                    'kinetic_model':    'legacy_kw',
+                    'kinetic_params': {
+                        'Ea_J_per_mol': -336.45,
+                        'a_m3s_per_mol': 2.2e-3,
+                        'b_s_inv': -35.11e-3,
+                    },
                 },
             },
             'cold': {
@@ -462,6 +573,16 @@ def create_cpfhx_config(back_pressure_mpa=1.04, flowrate_ratio=2.7):
                     'shape_factor':      1.0,
                     'mode':             'nominal',
                     'htc_model':        'martin_nilles',
+                    'hydraulic_model':  'psi_legacy',
+                    'phi_source':       'ch3_f_re_fit',
+                    'ht_enhancement_model': 'off',
+                    'ht_nominal_rule':  'geometric',
+                    'kinetic_model':    'legacy_kw',
+                    'kinetic_params': {
+                        'Ea_J_per_mol': -336.45,
+                        'a_m3s_per_mol': 2.2e-3,
+                        'b_s_inv': -35.11e-3,
+                    },
                 },
             },
         },

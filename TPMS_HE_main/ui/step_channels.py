@@ -2,7 +2,16 @@
 
 import streamlit as st
 
-from models.packed_bed import SUPPORTED_PACKED_MODES
+from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelations
+from models.packed_closures import (
+    SUPPORTED_PACKED_MODES,
+    get_allowed_channel_modes,
+    get_allowed_hydraulic_models,
+    get_allowed_packed_heat_transfer_models,
+    get_allowed_wall_enhancement_models,
+    get_allowed_kinetic_models,
+    get_structure_compatibility,
+)
 from ui.components import _k
 from ui.step_geometry import _eval_tpms_normalized, _render_tpms_thumbnail
 
@@ -38,6 +47,20 @@ def _render_htc_model_equations(htc_model: str):
                 r"$\lambda_s$ = solid conductivity; "
                 r"$\varepsilon$ = bed porosity; "
                 r"$\mathrm{Re} = \rho u d_p / \mu$."
+            )
+    elif htc_model == 'wang_wall_htc':
+        with st.expander("Wang wall HTC + Martin-Nilles bed model", expanded=False):
+            st.markdown("**Wall HTC correlation:**")
+            st.latex(r"\mathrm{Nu}_w = 0.028535\,\mathrm{Re}^{1.0651}\,\mathrm{Pr}^{5.3106}")
+            st.latex(r"h_w = \mathrm{Nu}_w\,k_f / d_p")
+            st.markdown("**Bed conduction and total resistance remain Martin-Nilles style:**")
+            st.latex(
+                r"\frac{1}{h_\mathrm{eff}} = \frac{1}{h_w}"
+                r" + \frac{D_h}{C_\mathrm{shape}\,k_{r,\mathrm{eff}}}"
+            )
+            st.caption(
+                "Only the wall-side HTC comes from the Wang fit. "
+                "Bed conduction and total resistance still follow the Martin-Nilles framework."
             )
     else:  # martin_nilles
         with st.expander("Martin-Nilles / ZBS model equations", expanded=False):
@@ -184,15 +207,63 @@ def _render_ergun_equations():
         )
 
 
+def _fmt_allowed(values):
+    return ", ".join(values) if values else "-"
+
+
+def _coerce_allowed_choice(current_value, allowed_values, fallback_value):
+    allowed_values = tuple(allowed_values)
+    if not allowed_values:
+        return None
+    if current_value in allowed_values:
+        return current_value
+    if fallback_value in allowed_values:
+        return fallback_value
+    return allowed_values[0]
+
+
+def _render_structure_model_relation_table():
+    with st.expander("Geometry to model compatibility", expanded=False):
+        lines = [
+            "| Structure | Modes | Hydraulic | Packed HTC | Wall Enhancement | Kinetics | Notes |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for structure in ThermoHydraulicCorrelations.get_supported_tpms_types():
+            compatibility = get_structure_compatibility(structure)
+            notes = "; ".join(compatibility["notes"]) if compatibility["notes"] else "-"
+            lines.append(
+                f"| {structure} | "
+                f"{_fmt_allowed(compatibility['channel_modes'])} | "
+                f"{_fmt_allowed(compatibility['hydraulic_models'])} | "
+                f"{_fmt_allowed(compatibility['htc_models'])} | "
+                f"{_fmt_allowed(compatibility['wall_enhancement_models'])} | "
+                f"{_fmt_allowed(compatibility['kinetic_models'])} | "
+                f"{notes} |"
+            )
+        st.markdown("\n".join(lines))
+        st.caption(
+            "Kinetics are not geometry-limited among packed-capable structures, "
+            "but only become active for hot + packed + hydrogen mixture channels."
+        )
+
+
 # ── Channel card ──────────────────────────────────────────────────────────────
 
 def render_channel_card(channel_name, channel_state, state):
     color_icon = "🔴" if channel_name == "hot" else "🔵"
     st.markdown(f"#### {color_icon} {channel_name.capitalize()} Channel")
+    struct = channel_state.get("structure", "")
+    allowed_modes = list(get_allowed_channel_modes(struct))
 
     # ── ⚙️ Flow Mode ──────────────────────────────────────────────────────────
     st.markdown("**⚙️ Flow Mode**")
-    mode_options = ["bare", "packed"]
+    mode_options = allowed_modes
+    selected_mode = _coerce_allowed_choice(
+        channel_state.get("mode", "bare"),
+        mode_options,
+        "bare",
+    )
+    channel_state["mode"] = selected_mode
     mode_idx = mode_options.index(channel_state["mode"]) if channel_state["mode"] in mode_options else 0
     channel_state["mode"] = st.selectbox(
         f"{channel_name} mode",
@@ -201,6 +272,8 @@ def render_channel_card(channel_name, channel_state, state):
         key=_k(f"{channel_name}_mode"),
         help="bare = open TPMS lattice (no catalyst); packed = packed catalyst bed inside TPMS.",
     )
+    if struct == "SmoothPlateFin":
+        st.info("SmoothPlateFin is limited to bare mode because the current backend has no dedicated packed smooth-duct closure.")
 
     # Show current structure as info (set in geometry step)
     struct = channel_state.get("structure", "")
@@ -238,23 +311,82 @@ def render_channel_card(channel_name, channel_state, state):
     if channel_state["mode"] == "packed":
         st.markdown("**📦 Packed-Bed Parameters**")
         packed = channel_state["packed"]
-        mode_idx = list(SUPPORTED_PACKED_MODES).index(packed["mode"]) if packed["mode"] in SUPPORTED_PACKED_MODES else 1
-        packed["mode"] = st.selectbox(
-            f"{channel_name} packed mode",
+        allowed_htc_models = list(get_allowed_packed_heat_transfer_models(struct))
+        allowed_hydraulic_models = list(get_allowed_hydraulic_models(struct))
+        allowed_enhancement_models = list(get_allowed_wall_enhancement_models(struct))
+        allowed_kinetic_models = list(get_allowed_kinetic_models(struct))
+        uncertainty_mode = packed.get("uncertainty_mode", packed.get("mode", "nominal"))
+        mode_idx = list(SUPPORTED_PACKED_MODES).index(uncertainty_mode) if uncertainty_mode in SUPPORTED_PACKED_MODES else 1
+        packed["uncertainty_mode"] = st.selectbox(
+            f"{channel_name} uncertainty mode",
             options=list(SUPPORTED_PACKED_MODES),
             index=mode_idx,
-            key=_k(f"{channel_name}_packed_mode"),
+            key=_k(f"{channel_name}_packed_uncertainty_mode"),
+            help="Packed-bed uncertainty band used for lower/nominal/upper estimates.",
         )
-        _HTC_MODELS = ('martin_nilles', 'dixon')
-        _htc_default = packed.get("htc_model", "martin_nilles")
-        _htc_idx = _HTC_MODELS.index(_htc_default) if _htc_default in _HTC_MODELS else 0
+        packed["htc_model"] = _coerce_allowed_choice(
+            packed.get("htc_model", "martin_nilles"),
+            allowed_htc_models,
+            "martin_nilles",
+        )
+        htc_idx = allowed_htc_models.index(packed["htc_model"]) if packed["htc_model"] in allowed_htc_models else 0
         packed["htc_model"] = st.selectbox(
             f"{channel_name} HTC model",
-            options=list(_HTC_MODELS),
-            index=_htc_idx,
+            options=allowed_htc_models,
+            index=htc_idx,
             key=_k(f"{channel_name}_htc_model"),
+            help="wang_wall_htc only replaces the wall HTC correlation; bed conduction still follows Martin-Nilles.",
         )
         _render_htc_model_equations(packed["htc_model"])
+        packed["hydraulic_model"] = _coerce_allowed_choice(
+            packed.get("hydraulic_model", "ergun_psi_tpms"),
+            allowed_hydraulic_models,
+            "ergun_psi_tpms",
+        )
+        hydraulic_idx = allowed_hydraulic_models.index(packed["hydraulic_model"]) if packed["hydraulic_model"] in allowed_hydraulic_models else 0
+        packed["hydraulic_model"] = st.selectbox(
+            f"{channel_name} hydraulic model",
+            options=allowed_hydraulic_models,
+            index=hydraulic_idx,
+            key=_k(f"{channel_name}_hydraulic_model"),
+            help="ergun_phi_fit means Ergun base friction multiplied by the Chapter 3 phi fit, not an independent experimental pressure-drop law.",
+        )
+        packed["ht_enhancement_model"] = _coerce_allowed_choice(
+            packed.get("ht_enhancement_model", "off"),
+            allowed_enhancement_models,
+            "off",
+        )
+        enhancement_idx = allowed_enhancement_models.index(packed["ht_enhancement_model"]) if packed["ht_enhancement_model"] in allowed_enhancement_models else 0
+        packed["ht_enhancement_model"] = st.selectbox(
+            f"{channel_name} wall enhancement",
+            options=allowed_enhancement_models,
+            index=enhancement_idx,
+            key=_k(f"{channel_name}_ht_enhancement_model"),
+            help="wall_from_phi directly enhances near-wall HTC only; it does not directly change packed-bed effective conductivity.",
+        )
+        packed["kinetic_model"] = _coerce_allowed_choice(
+            packed.get("kinetic_model", "wilhelmsen_kw"),
+            allowed_kinetic_models,
+            "wilhelmsen_kw",
+        )
+        kinetic_idx = allowed_kinetic_models.index(packed["kinetic_model"]) if packed["kinetic_model"] in allowed_kinetic_models else 0
+        packed["kinetic_model"] = st.selectbox(
+            f"{channel_name} kinetic model",
+            options=allowed_kinetic_models,
+            index=kinetic_idx,
+            key=_k(f"{channel_name}_kinetic_model"),
+            help="Only active for hot + packed + hydrogen mixture channels.",
+        )
+        st.caption(
+            f"Allowed for {struct}: hydraulic = {_fmt_allowed(allowed_hydraulic_models)}; "
+            f"HTC = {_fmt_allowed(allowed_htc_models)}; "
+            f"wall enhancement = {_fmt_allowed(allowed_enhancement_models)}; "
+            f"kinetics = {_fmt_allowed(allowed_kinetic_models)}."
+        )
+        if packed["htc_model"] == "wang_wall_htc":
+            st.info("wang_wall_htc only swaps the wall-side HTC correlation. Bed conduction and total resistance still use Martin-Nilles.")
+        if packed["ht_enhancement_model"] == "wall_from_phi":
+            st.info("wall_from_phi changes h_w/Nu_w directly and may affect Dixon Bi indirectly, but it does not directly modify k_r or k_r_eff.")
         _render_ergun_equations()
         pk1, pk2 = st.columns(2)
         packed["particle_diameter"] = pk1.number_input(
@@ -288,12 +420,15 @@ def render_channel_card(channel_name, channel_state, state):
             step=0.01,
             key=_k(f"{channel_name}_shape"),
         )
+        packed.pop("mode", None)
 
     st.divider()
 
 
 def render_step_channels(state):
     st.subheader("⚙️ Channel Modeling")
+    st.caption("Geometry choice constrains which downstream channel and packed-bed submodels can be selected.")
+    _render_structure_model_relation_table()
     c1, c2 = st.columns(2)
     with c1:
         render_channel_card("hot", state["channels"]["hot"], state)

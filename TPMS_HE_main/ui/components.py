@@ -23,10 +23,10 @@ def render_channel_summary_strip(state):
     cold = state["channels"]["cold"]
     c1, c2 = st.columns(2)
     c1.info(
-        f"Hot: {hot['mode']} / {hot['structure']} / packed-mode {hot['packed']['mode']}"
+        f"Hot: {hot['mode']} / {hot['structure']} / packed uncertainty {hot['packed'].get('uncertainty_mode', 'nominal')}"
     )
     c2.info(
-        f"Cold: {cold['mode']} / {cold['structure']} / packed-mode {cold['packed']['mode']}"
+        f"Cold: {cold['mode']} / {cold['structure']} / packed uncertainty {cold['packed'].get('uncertainty_mode', 'nominal')}"
     )
 
 
@@ -82,11 +82,15 @@ def render_summary_table(state, issues):
             rows = [
                 ("mode", ch_cfg["mode"]),
                 ("structure", ch_cfg["structure"]),
-                ("packed.mode", ch_cfg["packed"]["mode"]),
+                ("packed.uncertainty_mode", ch_cfg["packed"].get("uncertainty_mode", "nominal")),
             ]
             if ch_cfg["mode"] == "packed":
                 rows.extend(
                     [
+                        ("packed.htc_model", ch_cfg["packed"]["htc_model"]),
+                        ("packed.hydraulic_model", ch_cfg["packed"]["hydraulic_model"]),
+                        ("packed.ht_enhancement_model", ch_cfg["packed"]["ht_enhancement_model"]),
+                        ("packed.kinetic_model", ch_cfg["packed"]["kinetic_model"]),
                         ("packed.particle_diameter [m]", ch_cfg["packed"]["particle_diameter"]),
                         ("packed.bed_porosity", ch_cfg["packed"]["bed_porosity"]),
                         ("packed.k_solid [W/m-K]", ch_cfg["packed"]["k_solid"]),

@@ -7,11 +7,21 @@ Updated for compatibility with the new dictionary-based TPMSHeatExchanger class.
 """
 
 import os
+import sys
+from pathlib import Path
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 import pandas as pd
 from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelations
+
+ROOT = Path(__file__).resolve().parents[4]
+ANALYSIS_DIR = ROOT / "code" / "analysis"
+if str(ANALYSIS_DIR) not in sys.path:
+    sys.path.append(str(ANALYSIS_DIR))
+
+from figure_localization import save_figure_with_chinese_version
 
 
 class TPMSVisualizer:
@@ -48,8 +58,8 @@ class TPMSVisualizer:
         Apply rigorous academic formatting to matplotlib
         """
         plt.rcdefaults()
-        plt.rcParams['font.family'] = 'serif'
-        plt.rcParams['font.serif'] = ['Times New Roman']
+        plt.rcParams['font.family'] = ['Times New Roman', 'SimSun']
+        plt.rcParams['font.serif'] = ['Times New Roman', 'SimSun']
         plt.rcParams['mathtext.fontset'] = 'stix'
 
         plt.rcParams['font.size'] = 14
@@ -245,7 +255,7 @@ class TPMSVisualizer:
         ax6.axis('off')
         self._add_summary_text(ax6)
 
-        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        save_figure_with_chinese_version(fig, Path(save_path), dpi=300, bbox_inches='tight')
         print(f"[OK] Performance plot saved to {save_path}")
         # plt.show() # Optional: Comment out if running in batch mode without display
 
@@ -436,7 +446,7 @@ class TPMSVisualizer:
 
         fig.tight_layout()
         if save_path:
-            fig.savefig(save_path, bbox_inches='tight', dpi=200)
+            save_figure_with_chinese_version(fig, Path(save_path), dpi=200, bbox_inches='tight')
             print(f"[OK] Resistance pie chart saved to {save_path}")
         plt.close(fig)
         return fig
@@ -570,7 +580,7 @@ class TPMSVisualizer:
 
         plt.tight_layout()
         os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
-        plt.savefig(save_path, bbox_inches='tight', dpi=300)
+        save_figure_with_chinese_version(fig, Path(save_path), dpi=300, bbox_inches='tight')
         print(f"[OK] Performance evaluation plot saved to {save_path}")
         plt.close(fig)
         return fig

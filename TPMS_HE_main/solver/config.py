@@ -14,12 +14,30 @@ import warnings
 import numpy as np
 
 from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelations
+from models.packed_closures import (
+    SUPPORTED_PACKED_MODES,
+    SUPPORTED_HYDRAULIC_MODELS,
+    SUPPORTED_PHI_SOURCES,
+    SUPPORTED_HT_NOMINAL_RULES,
+    SUPPORTED_PACKED_HEAT_TRANSFER_MODELS as SUPPORTED_HTC_MODELS,
+    SUPPORTED_WALL_ENHANCEMENT_MODELS as SUPPORTED_HT_ENHANCEMENT_MODELS,
+    SUPPORTED_KINETIC_MODELS,
+    get_allowed_channel_modes,
+    get_allowed_hydraulic_models,
+    get_allowed_packed_heat_transfer_models,
+    get_allowed_wall_enhancement_models,
+    get_allowed_kinetic_models,
+    normalize_hydraulic_model,
+    normalize_packed_heat_transfer_model,
+    normalize_wall_enhancement_model,
+    normalize_kinetic_model,
+)
 
 # Channel modes accepted by the solver
 SUPPORTED_CHANNEL_MODES = ("bare", "packed")
 # Packed-bed uncertainty modes
-SUPPORTED_HTC_MODELS = ('martin_nilles', 'dixon', 'wang_experiment')
-SUPPORTED_KINETIC_MODELS = ('legacy_kw', 'arrhenius_first_order')
+SUPPORTED_HTC_MODELS = ('martin_nilles', 'dixon', 'wang_wall_htc')
+SUPPORTED_KINETIC_MODELS = ('wilhelmsen_kw', 'arrhenius_first_order')
 
 # ── Re-export for backward compatibility ───────────────────────────────────────
 # These are needed by solver/calculator.py without a cross-import
@@ -55,6 +73,141 @@ def _validate_tpms_structure(structure, stream_key):
         )
 
 
+def _warn_deprecated_alias(field_path, legacy_value, canonical_value):
+    if str(legacy_value).strip().lower() == str(canonical_value).strip().lower():
+        return
+    warnings.warn(
+        f"{field_path}='{legacy_value}' is deprecated; use '{canonical_value}' instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+
+
+def _normalize_packed_choice(stream_key, packed_cfg, field, default, normalizer, supported):
+    raw_value = packed_cfg.get(field, default)
+    canonical_value = normalizer(raw_value)
+    if str(raw_value).strip().lower() != canonical_value:
+        _warn_deprecated_alias(
+            f"channels.{stream_key}.packed.{field}",
+            raw_value,
+            canonical_value,
+        )
+    if canonical_value not in supported:
+        raise ValueError(
+            f"Invalid {field} '{canonical_value}' for '{stream_key}'. "
+            f"Use one of {supported}."
+        )
+    packed_cfg[field] = canonical_value
+    return canonical_value
+
+
+def _normalize_uncertainty_mode(stream_key, packed_cfg, fallback_cfg, source_cfg=None):
+    source_cfg = source_cfg or {}
+    has_uncertainty_mode = "uncertainty_mode" in source_cfg
+    has_legacy_mode = "mode" in source_cfg
+    default_uncertainty = str(
+        fallback_cfg.get("uncertainty_mode", fallback_cfg.get("mode", "nominal"))
+    ).strip().lower()
+
+    if has_uncertainty_mode:
+        uncertainty_value = source_cfg.get("uncertainty_mode")
+        if has_legacy_mode:
+            uncertainty_value_norm = str(uncertainty_value).strip().lower()
+            legacy_mode_norm = str(source_cfg.get("mode")).strip().lower()
+            if uncertainty_value_norm == default_uncertainty and legacy_mode_norm != uncertainty_value_norm:
+                warnings.warn(
+                    f"channels.{stream_key}.packed.mode is deprecated but overrides the "
+                    "default uncertainty_mode for backward compatibility.",
+                    DeprecationWarning,
+                    stacklevel=3,
+                )
+                uncertainty_value = source_cfg.get("mode")
+    elif has_legacy_mode:
+        uncertainty_value = source_cfg.get("mode")
+        warnings.warn(
+            f"channels.{stream_key}.packed.mode is deprecated; "
+            f"use channels.{stream_key}.packed.uncertainty_mode instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    else:
+        uncertainty_value = fallback_cfg.get(
+            "uncertainty_mode",
+            fallback_cfg.get("mode", "nominal"),
+        )
+
+    if (
+        has_uncertainty_mode
+        and has_legacy_mode
+        and str(source_cfg.get("mode")).strip().lower()
+        != str(source_cfg.get("uncertainty_mode")).strip().lower()
+        and str(uncertainty_value).strip().lower()
+        == str(source_cfg.get("uncertainty_mode")).strip().lower()
+    ):
+        warnings.warn(
+            f"channels.{stream_key}.packed.mode is deprecated and ignored when "
+            f"channels.{stream_key}.packed.uncertainty_mode is present.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+    packed_uncertainty_mode = str(uncertainty_value).strip().lower()
+    if packed_uncertainty_mode not in SUPPORTED_PACKED_MODES:
+        raise ValueError(
+            f"Invalid packed uncertainty_mode '{packed_uncertainty_mode}' for '{stream_key}'. "
+            f"Use one of {SUPPORTED_PACKED_MODES}."
+        )
+
+    packed_cfg["uncertainty_mode"] = packed_uncertainty_mode
+    packed_cfg["mode"] = packed_uncertainty_mode
+    return packed_uncertainty_mode
+
+
+def _normalize_catalyst_config(cfg):
+    catalyst = cfg.setdefault("catalyst", {})
+    if not catalyst:
+        return
+
+    if "uncertainty_mode" not in catalyst and "mode" in catalyst:
+        warnings.warn(
+            "catalyst.mode is deprecated; use catalyst.uncertainty_mode instead.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        catalyst["uncertainty_mode"] = catalyst["mode"]
+
+    if "uncertainty_mode" in catalyst:
+        catalyst["uncertainty_mode"] = str(
+            catalyst.get("uncertainty_mode", "nominal")
+        ).strip().lower()
+        if catalyst["uncertainty_mode"] not in SUPPORTED_PACKED_MODES:
+            raise ValueError(
+                f"Invalid catalyst uncertainty_mode '{catalyst['uncertainty_mode']}'. "
+                f"Use one of {SUPPORTED_PACKED_MODES}."
+            )
+
+    if "hydraulic_model" in catalyst:
+        raw_value = catalyst["hydraulic_model"]
+        catalyst["hydraulic_model"] = normalize_hydraulic_model(raw_value)
+        _warn_deprecated_alias("catalyst.hydraulic_model", raw_value, catalyst["hydraulic_model"])
+    if "htc_model" in catalyst:
+        raw_value = catalyst["htc_model"]
+        catalyst["htc_model"] = normalize_packed_heat_transfer_model(raw_value)
+        _warn_deprecated_alias("catalyst.htc_model", raw_value, catalyst["htc_model"])
+    if "ht_enhancement_model" in catalyst:
+        raw_value = catalyst["ht_enhancement_model"]
+        catalyst["ht_enhancement_model"] = normalize_wall_enhancement_model(raw_value)
+        _warn_deprecated_alias(
+            "catalyst.ht_enhancement_model",
+            raw_value,
+            catalyst["ht_enhancement_model"],
+        )
+    if "kinetic_model" in catalyst:
+        raw_value = catalyst["kinetic_model"]
+        catalyst["kinetic_model"] = normalize_kinetic_model(raw_value)
+        _warn_deprecated_alias("catalyst.kinetic_model", raw_value, catalyst["kinetic_model"])
+
+
 def _normalize_single_channel(cfg, stream_key):
     channels = cfg.setdefault("channels", {})
     tpms_cfg = cfg.setdefault("tpms", {})
@@ -73,6 +226,11 @@ def _normalize_single_channel(cfg, stream_key):
 
     structure = ch_cfg.get("structure", legacy_structure)
     _validate_tpms_structure(structure, stream_key)
+    allowed_modes = get_allowed_channel_modes(structure)
+    if mode not in allowed_modes:
+        raise ValueError(
+            f"Channel '{stream_key}' structure '{structure}' only supports modes {allowed_modes}."
+        )
 
     packed_defaults = {
         "particle_diameter": cat.get("particle_diameter", 1e-3),
@@ -80,12 +238,13 @@ def _normalize_single_channel(cfg, stream_key):
         "k_solid": cat.get("k_solid", 10.0),
         "k_solid_material": cat.get("k_solid_material", None),
         "shape_factor": cat.get("shape_factor", 1.0),
-        "mode": cat.get("mode", "nominal"),
-        "hydraulic_model": cat.get("hydraulic_model", "psi_legacy"),
+        "uncertainty_mode": cat.get("uncertainty_mode", cat.get("mode", "nominal")),
+        "hydraulic_model": cat.get("hydraulic_model", "ergun_psi_tpms"),
+        "htc_model": cat.get("htc_model", "martin_nilles"),
         "phi_source": cat.get("phi_source", "ch3_f_re_fit"),
         "ht_enhancement_model": cat.get("ht_enhancement_model", "off"),
         "ht_nominal_rule": cat.get("ht_nominal_rule", "geometric"),
-        "kinetic_model": cat.get("kinetic_model", "legacy_kw"),
+        "kinetic_model": cat.get("kinetic_model", "wilhelmsen_kw"),
     }
     kinetic_params_defaults = {
         "Ea_J_per_mol": -336.45,
@@ -94,35 +253,47 @@ def _normalize_single_channel(cfg, stream_key):
     }
     kinetic_params_defaults.update(cat.get("kinetic_params", {}))
 
+    packed_source_cfg = copy.deepcopy(ch_cfg.get("packed", {}) or {})
     packed_cfg = copy.deepcopy(packed_defaults)
-    packed_cfg.update(ch_cfg.get("packed", {}))
+    packed_cfg.update(packed_source_cfg)
     kinetic_params = copy.deepcopy(kinetic_params_defaults)
-    kinetic_params.update((ch_cfg.get("packed", {}) or {}).get("kinetic_params", {}))
+    kinetic_params.update(packed_source_cfg.get("kinetic_params", {}))
     packed_cfg["kinetic_params"] = kinetic_params
 
-    packed_mode = str(packed_cfg.get("mode", "nominal")).strip().lower()
-    if packed_mode not in SUPPORTED_PACKED_MODES:
-        raise ValueError(
-            f"Invalid packed mode '{packed_mode}' for '{stream_key}'. "
-            f"Use one of {SUPPORTED_PACKED_MODES}."
-        )
-    packed_cfg["mode"] = packed_mode
+    packed_mode = _normalize_uncertainty_mode(
+        stream_key,
+        packed_cfg,
+        packed_defaults,
+        packed_source_cfg,
+    )
 
-    htc_model = str(packed_cfg.get("htc_model", "martin_nilles")).strip().lower()
-    if htc_model not in SUPPORTED_HTC_MODELS:
+    _normalize_packed_choice(
+        stream_key,
+        packed_cfg,
+        "htc_model",
+        "martin_nilles",
+        normalize_packed_heat_transfer_model,
+        SUPPORTED_HTC_MODELS,
+    )
+    if mode == "packed" and packed_cfg["htc_model"] not in get_allowed_packed_heat_transfer_models(structure):
         raise ValueError(
-            f"Invalid htc_model '{htc_model}' for '{stream_key}'. "
-            f"Use one of {SUPPORTED_HTC_MODELS}."
+            f"Channel '{stream_key}' structure '{structure}' only supports HTC models "
+            f"{get_allowed_packed_heat_transfer_models(structure)}."
         )
-    packed_cfg["htc_model"] = htc_model
 
-    hydraulic_model = str(packed_cfg.get("hydraulic_model", "psi_legacy")).strip().lower()
-    if hydraulic_model not in SUPPORTED_HYDRAULIC_MODELS:
+    _normalize_packed_choice(
+        stream_key,
+        packed_cfg,
+        "hydraulic_model",
+        "ergun_psi_tpms",
+        normalize_hydraulic_model,
+        SUPPORTED_HYDRAULIC_MODELS,
+    )
+    if mode == "packed" and packed_cfg["hydraulic_model"] not in get_allowed_hydraulic_models(structure):
         raise ValueError(
-            f"Invalid hydraulic_model '{hydraulic_model}' for '{stream_key}'. "
-            f"Use one of {SUPPORTED_HYDRAULIC_MODELS}."
+            f"Channel '{stream_key}' structure '{structure}' only supports hydraulic models "
+            f"{get_allowed_hydraulic_models(structure)}."
         )
-    packed_cfg["hydraulic_model"] = hydraulic_model
 
     phi_source = str(packed_cfg.get("phi_source", "ch3_f_re_fit")).strip().lower()
     if phi_source not in SUPPORTED_PHI_SOURCES:
@@ -132,15 +303,19 @@ def _normalize_single_channel(cfg, stream_key):
         )
     packed_cfg["phi_source"] = phi_source
 
-    ht_enhancement_model = str(
-        packed_cfg.get("ht_enhancement_model", "off")
-    ).strip().lower()
-    if ht_enhancement_model not in SUPPORTED_HT_ENHANCEMENT_MODELS:
+    _normalize_packed_choice(
+        stream_key,
+        packed_cfg,
+        "ht_enhancement_model",
+        "off",
+        normalize_wall_enhancement_model,
+        SUPPORTED_HT_ENHANCEMENT_MODELS,
+    )
+    if mode == "packed" and packed_cfg["ht_enhancement_model"] not in get_allowed_wall_enhancement_models(structure):
         raise ValueError(
-            f"Invalid ht_enhancement_model '{ht_enhancement_model}' for '{stream_key}'. "
-            f"Use one of {SUPPORTED_HT_ENHANCEMENT_MODELS}."
+            f"Channel '{stream_key}' structure '{structure}' only supports wall enhancement models "
+            f"{get_allowed_wall_enhancement_models(structure)}."
         )
-    packed_cfg["ht_enhancement_model"] = ht_enhancement_model
 
     ht_nominal_rule = str(packed_cfg.get("ht_nominal_rule", "geometric")).strip().lower()
     if ht_nominal_rule not in SUPPORTED_HT_NOMINAL_RULES:
@@ -150,13 +325,19 @@ def _normalize_single_channel(cfg, stream_key):
         )
     packed_cfg["ht_nominal_rule"] = ht_nominal_rule
 
-    kinetic_model = str(packed_cfg.get("kinetic_model", "legacy_kw")).strip().lower()
-    if kinetic_model not in SUPPORTED_KINETIC_MODELS:
+    _normalize_packed_choice(
+        stream_key,
+        packed_cfg,
+        "kinetic_model",
+        "wilhelmsen_kw",
+        normalize_kinetic_model,
+        SUPPORTED_KINETIC_MODELS,
+    )
+    if mode == "packed" and packed_cfg["kinetic_model"] not in get_allowed_kinetic_models(structure):
         raise ValueError(
-            f"Invalid kinetic_model '{kinetic_model}' for '{stream_key}'. "
-            f"Use one of {SUPPORTED_KINETIC_MODELS}."
+            f"Channel '{stream_key}' structure '{structure}' only supports kinetic models "
+            f"{get_allowed_kinetic_models(structure)}."
         )
-    packed_cfg["kinetic_model"] = kinetic_model
 
     kp = copy.deepcopy(packed_cfg.get("kinetic_params", {}))
     packed_cfg["kinetic_params"] = {
@@ -227,6 +408,7 @@ def normalize_config(config):
     cfg.setdefault("output", {})
     cfg.setdefault("tpms", {})
     cfg.setdefault("channels", {})
+    cfg.setdefault("catalyst", {})
 
     solver = cfg["solver"]
     if "relax_thermal" not in solver and "relax" in solver:
@@ -276,6 +458,8 @@ def normalize_config(config):
     output.setdefault("performance_plot", "results/performance_profile.png")
     output.setdefault("convergence_plot", "results/convergence_diagnostics.png")
     output.setdefault("performance_eval_plot", "results/performance_evaluation.png")
+
+    _normalize_catalyst_config(cfg)
 
     _normalize_single_channel(cfg, "hot")
     _normalize_single_channel(cfg, "cold")
@@ -381,13 +565,13 @@ def create_default_config():
                     'bed_porosity': 0.40,
                     'k_solid': 10.0,
                     'shape_factor': 1.0,
-                    'mode': 'nominal',
+                    'uncertainty_mode': 'nominal',
                     'htc_model': 'martin_nilles',
-                    'hydraulic_model': 'psi_legacy',
+                    'hydraulic_model': 'ergun_psi_tpms',
                     'phi_source': 'ch3_f_re_fit',
                     'ht_enhancement_model': 'off',
                     'ht_nominal_rule': 'geometric',
-                    'kinetic_model': 'legacy_kw',
+                    'kinetic_model': 'wilhelmsen_kw',
                     'kinetic_params': {
                         'Ea_J_per_mol': -336.45,
                         'a_m3s_per_mol': 2.2e-3,
@@ -405,13 +589,13 @@ def create_default_config():
                     'bed_porosity': 0.40,
                     'k_solid': 10.0,
                     'shape_factor': 1.0,
-                    'mode': 'nominal',
+                    'uncertainty_mode': 'nominal',
                     'htc_model': 'martin_nilles',
-                    'hydraulic_model': 'psi_legacy',
+                    'hydraulic_model': 'ergun_psi_tpms',
                     'phi_source': 'ch3_f_re_fit',
                     'ht_enhancement_model': 'off',
                     'ht_nominal_rule': 'geometric',
-                    'kinetic_model': 'legacy_kw',
+                    'kinetic_model': 'wilhelmsen_kw',
                     'kinetic_params': {
                         'Ea_J_per_mol': -336.45,
                         'a_m3s_per_mol': 2.2e-3,
@@ -432,13 +616,13 @@ def create_default_config():
             'bed_porosity': 0.40,
             'k_solid': 10.0,
             'shape_factor': 1.0,
-            'mode': 'nominal',
+            'uncertainty_mode': 'nominal',
             'htc_model': 'martin_nilles',
-            'hydraulic_model': 'psi_legacy',
+            'hydraulic_model': 'ergun_psi_tpms',
             'phi_source': 'ch3_f_re_fit',
             'ht_enhancement_model': 'off',
             'ht_nominal_rule': 'geometric',
-            'kinetic_model': 'legacy_kw',
+            'kinetic_model': 'wilhelmsen_kw',
             'kinetic_params': {
                 'Ea_J_per_mol': -336.45,
                 'a_m3s_per_mol': 2.2e-3,
@@ -538,13 +722,13 @@ def create_cpfhx_config(back_pressure_mpa=1.04, flowrate_ratio=2.7):
                     'bed_porosity':      0.40,
                     'k_solid':           10.0,
                     'shape_factor':      1.0,
-                    'mode':             'nominal',
+                    'uncertainty_mode': 'nominal',
                     'htc_model':        'martin_nilles',
-                    'hydraulic_model':  'psi_legacy',
+                    'hydraulic_model':  'ergun_psi_tpms',
                     'phi_source':       'ch3_f_re_fit',
                     'ht_enhancement_model': 'off',
                     'ht_nominal_rule':  'geometric',
-                    'kinetic_model':    'legacy_kw',
+                    'kinetic_model':    'wilhelmsen_kw',
                     'kinetic_params': {
                         'Ea_J_per_mol': -336.45,
                         'a_m3s_per_mol': 2.2e-3,
@@ -571,13 +755,13 @@ def create_cpfhx_config(back_pressure_mpa=1.04, flowrate_ratio=2.7):
                     'bed_porosity':      0.40,
                     'k_solid':           10.0,
                     'shape_factor':      1.0,
-                    'mode':             'nominal',
+                    'uncertainty_mode': 'nominal',
                     'htc_model':        'martin_nilles',
-                    'hydraulic_model':  'psi_legacy',
+                    'hydraulic_model':  'ergun_psi_tpms',
                     'phi_source':       'ch3_f_re_fit',
                     'ht_enhancement_model': 'off',
                     'ht_nominal_rule':  'geometric',
-                    'kinetic_model':    'legacy_kw',
+                    'kinetic_model':    'wilhelmsen_kw',
                     'kinetic_params': {
                         'Ea_J_per_mol': -336.45,
                         'a_m3s_per_mol': 2.2e-3,

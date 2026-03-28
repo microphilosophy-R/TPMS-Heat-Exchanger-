@@ -5,8 +5,19 @@ import copy
 import streamlit as st
 
 from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelations
-from models.packed_bed import SUPPORTED_PACKED_MODES
-from solver.config import create_default_config
+from models.packed_closures import (
+    SUPPORTED_PACKED_MODES,
+    SUPPORTED_HYDRAULIC_MODELS,
+    SUPPORTED_PACKED_HEAT_TRANSFER_MODELS,
+    SUPPORTED_WALL_ENHANCEMENT_MODELS,
+    SUPPORTED_KINETIC_MODELS,
+    get_allowed_channel_modes,
+    get_allowed_hydraulic_models,
+    get_allowed_packed_heat_transfer_models,
+    get_allowed_wall_enhancement_models,
+    get_allowed_kinetic_models,
+)
+from solver.config import create_default_config, normalize_config
 
 def _add_issue(issues, level, section, field, message):
     issues.append(
@@ -116,6 +127,7 @@ def validate_ui_state(state):
     supported_tpms = set(ThermoHydraulicCorrelations.get_supported_tpms_types())
     for ch in ("hot", "cold"):
         ch_cfg = channels[ch]
+        allowed_modes = get_allowed_channel_modes(ch_cfg["structure"])
         if ch_cfg["mode"] not in ("bare", "packed"):
             _add_issue(
                 issues,
@@ -123,6 +135,14 @@ def validate_ui_state(state):
                 "channels",
                 f"{ch}.mode",
                 f"{ch} mode must be 'bare' or 'packed'.",
+            )
+        elif ch_cfg["mode"] not in allowed_modes:
+            _add_issue(
+                issues,
+                "error",
+                "channels",
+                f"{ch}.mode",
+                f"{ch} structure {ch_cfg['structure']} only allows modes {allowed_modes}.",
             )
         if ch_cfg["structure"] not in supported_tpms:
             _add_issue(
@@ -134,13 +154,82 @@ def validate_ui_state(state):
             )
         if ch_cfg["mode"] == "packed":
             packed = ch_cfg["packed"]
-            if packed["mode"] not in SUPPORTED_PACKED_MODES:
+            allowed_hydraulic = get_allowed_hydraulic_models(ch_cfg["structure"])
+            allowed_htc_models = get_allowed_packed_heat_transfer_models(ch_cfg["structure"])
+            allowed_enhancement = get_allowed_wall_enhancement_models(ch_cfg["structure"])
+            allowed_kinetics = get_allowed_kinetic_models(ch_cfg["structure"])
+            uncertainty_mode = packed.get("uncertainty_mode", packed.get("mode"))
+            if uncertainty_mode not in SUPPORTED_PACKED_MODES:
                 _add_issue(
                     issues,
                     "error",
                     "channels",
-                    f"{ch}.packed.mode",
-                    f"{ch} packed mode must be one of {SUPPORTED_PACKED_MODES}.",
+                    f"{ch}.packed.uncertainty_mode",
+                    f"{ch} packed uncertainty_mode must be one of {SUPPORTED_PACKED_MODES}.",
+                )
+            if packed.get("hydraulic_model") not in SUPPORTED_HYDRAULIC_MODELS:
+                _add_issue(
+                    issues,
+                    "error",
+                    "channels",
+                    f"{ch}.packed.hydraulic_model",
+                    f"{ch} hydraulic_model must be one of {SUPPORTED_HYDRAULIC_MODELS}.",
+                )
+            elif packed.get("hydraulic_model") not in allowed_hydraulic:
+                _add_issue(
+                    issues,
+                    "error",
+                    "channels",
+                    f"{ch}.packed.hydraulic_model",
+                    f"{ch} structure {ch_cfg['structure']} only allows hydraulic models {allowed_hydraulic}.",
+                )
+            if packed.get("htc_model") not in SUPPORTED_PACKED_HEAT_TRANSFER_MODELS:
+                _add_issue(
+                    issues,
+                    "error",
+                    "channels",
+                    f"{ch}.packed.htc_model",
+                    f"{ch} htc_model must be one of {SUPPORTED_PACKED_HEAT_TRANSFER_MODELS}.",
+                )
+            elif packed.get("htc_model") not in allowed_htc_models:
+                _add_issue(
+                    issues,
+                    "error",
+                    "channels",
+                    f"{ch}.packed.htc_model",
+                    f"{ch} structure {ch_cfg['structure']} only allows HTC models {allowed_htc_models}.",
+                )
+            if packed.get("ht_enhancement_model") not in SUPPORTED_WALL_ENHANCEMENT_MODELS:
+                _add_issue(
+                    issues,
+                    "error",
+                    "channels",
+                    f"{ch}.packed.ht_enhancement_model",
+                    f"{ch} ht_enhancement_model must be one of {SUPPORTED_WALL_ENHANCEMENT_MODELS}.",
+                )
+            elif packed.get("ht_enhancement_model") not in allowed_enhancement:
+                _add_issue(
+                    issues,
+                    "error",
+                    "channels",
+                    f"{ch}.packed.ht_enhancement_model",
+                    f"{ch} structure {ch_cfg['structure']} only allows wall enhancement models {allowed_enhancement}.",
+                )
+            if packed.get("kinetic_model") not in SUPPORTED_KINETIC_MODELS:
+                _add_issue(
+                    issues,
+                    "error",
+                    "channels",
+                    f"{ch}.packed.kinetic_model",
+                    f"{ch} kinetic_model must be one of {SUPPORTED_KINETIC_MODELS}.",
+                )
+            elif packed.get("kinetic_model") not in allowed_kinetics:
+                _add_issue(
+                    issues,
+                    "error",
+                    "channels",
+                    f"{ch}.packed.kinetic_model",
+                    f"{ch} structure {ch_cfg['structure']} only allows kinetic models {allowed_kinetics}.",
                 )
             if packed["particle_diameter"] <= 0:
                 _add_issue(
@@ -213,7 +302,15 @@ def build_solver_config(state):
     cfg["solver"].update(copy.deepcopy(state["solver"]))
     cfg["output"].update(copy.deepcopy(state["output"]))
 
+    for ch in ("hot", "cold"):
+        cfg["channels"][ch]["packed"].pop("mode", None)
+
     # Keep legacy catalyst synced for compatibility code paths.
     cfg["catalyst"].update(copy.deepcopy(state["channels"]["hot"]["packed"]))
-    return cfg
+    cfg["catalyst"].pop("mode", None)
+    normalized = normalize_config(cfg)
+    for ch in ("hot", "cold"):
+        normalized["channels"][ch]["packed"].pop("mode", None)
+    normalized["catalyst"].pop("mode", None)
+    return normalized
 

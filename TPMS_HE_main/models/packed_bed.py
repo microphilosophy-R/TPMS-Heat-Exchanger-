@@ -31,12 +31,19 @@ References
 
 import numpy as np
 import warnings
-
-SUPPORTED_PACKED_MODES = ('lower', 'nominal', 'upper')
-SUPPORTED_HYDRAULIC_MODELS = ('psi_legacy', 'phi_re_fit')
-SUPPORTED_PHI_SOURCES = ('ch3_f_re_fit',)
-SUPPORTED_HT_ENHANCEMENT_MODELS = ('off', 'from_phi')
-SUPPORTED_HT_NOMINAL_RULES = ('geometric', 'arithmetic')
+from models.packed_closures import (
+    SUPPORTED_PACKED_MODES,
+    SUPPORTED_HYDRAULIC_MODELS,
+    SUPPORTED_PHI_SOURCES,
+    SUPPORTED_HT_NOMINAL_RULES,
+    SUPPORTED_WALL_ENHANCEMENT_MODELS as SUPPORTED_HT_ENHANCEMENT_MODELS,
+    normalize_hydraulic_model,
+    normalize_packed_heat_transfer_model,
+    normalize_wall_enhancement_model,
+    get_hydraulic_closure,
+    get_packed_heat_transfer_closure,
+    get_wall_enhancement_policy,
+)
 
 # Chapter 3 fit summary: f = A * Re^b
 _CH3_F_RE_COEFFS = {
@@ -105,9 +112,13 @@ class PackedBedTPMSModel:
         # TPMS: alpha * H (SAD 脳 channel height); PlateFin: (2*Hf - tf) / sf
         self.Afin_Abase = tpms_geometry.get('Afin_Abase_ratio', 0.0)
         # Model controls for hydraulic/thermal enhancement
-        self.hydraulic_model = str(catalyst_config.get('hydraulic_model', 'psi_legacy')).strip().lower()
+        self.hydraulic_model = normalize_hydraulic_model(
+            catalyst_config.get('hydraulic_model', 'ergun_psi_tpms')
+        )
         self.phi_source = str(catalyst_config.get('phi_source', 'ch3_f_re_fit')).strip().lower()
-        self.ht_enhancement_model = str(catalyst_config.get('ht_enhancement_model', 'off')).strip().lower()
+        self.ht_enhancement_model = normalize_wall_enhancement_model(
+            catalyst_config.get('ht_enhancement_model', 'off')
+        )
         self.ht_nominal_rule = str(catalyst_config.get('ht_nominal_rule', 'geometric')).strip().lower()
 
         if self.d_p <= 0:
@@ -118,16 +129,15 @@ class PackedBedTPMSModel:
             raise ValueError("shape_factor must be > 0")
         if not (0.05 <= self.eps_bed <= 0.95):
             raise ValueError("bed_porosity must be within [0.05, 0.95]")
-        if self.hydraulic_model not in SUPPORTED_HYDRAULIC_MODELS:
-            raise ValueError(f"hydraulic_model must be one of {SUPPORTED_HYDRAULIC_MODELS}")
         if self.phi_source not in SUPPORTED_PHI_SOURCES:
             raise ValueError(f"phi_source must be one of {SUPPORTED_PHI_SOURCES}")
-        if self.ht_enhancement_model not in SUPPORTED_HT_ENHANCEMENT_MODELS:
-            raise ValueError(
-                f"ht_enhancement_model must be one of {SUPPORTED_HT_ENHANCEMENT_MODELS}"
-            )
         if self.ht_nominal_rule not in SUPPORTED_HT_NOMINAL_RULES:
             raise ValueError(f"ht_nominal_rule must be one of {SUPPORTED_HT_NOMINAL_RULES}")
+
+        self.hydraulic_closure = get_hydraulic_closure(self.hydraulic_model)
+        self.wall_enhancement_policy = get_wall_enhancement_policy(
+            self.ht_enhancement_model
+        )
 
         # 娲剧敓鍙傛暟
         self.N_ratio = self.D_h / self.d_p  # 绠″緞/绮掑緞姣?
@@ -470,7 +480,9 @@ class PackedBedTPMSModel:
         phi = max(float(phi_value), 1.0)
         lower = 1.0
         upper = phi
-        if self.ht_nominal_rule == 'arithmetic':
+        if self.ht_nominal_rule == 'similarity':
+            nominal = phi
+        elif self.ht_nominal_rule == 'arithmetic':
             nominal = 0.5 * (lower + upper)
         else:
             nominal = np.sqrt(phi)
@@ -481,97 +493,67 @@ class PackedBedTPMSModel:
         Returns (lower, nominal, upper, used_factor) for traceability.
         """
         mode = str(mode).strip().lower()
-        lower, nominal, upper = self._ht_enhancement_bounds(phi_value)
-        if self.ht_enhancement_model != 'from_phi':
-            return lower, nominal, upper, 1.0
-        if mode == 'lower':
-            used = lower
-        elif mode == 'upper':
-            used = upper
-        else:
-            used = nominal
-        return lower, nominal, upper, used
+        return self.wall_enhancement_policy.select_factor(self, mode, phi_value)
 
     # ================================================================
     # 4. 缁煎悎澹侀潰浼犵儹绯绘暟 (鍚尯闂翠及璁?
     # ================================================================
 
-    def overall_htc_dixon(self, Re_p, Pr, k_f, mode='nominal', Nu_w0=20.0, T=None,
-                          phi_value=1.0):
-        """
-        Dixon鐑樆妯″瀷缁煎悎浼犵儹绯绘暟 (Eqs 0.1, 0.2):
-            1/h_i = 1/h_w + (D_h/(6路k_r))路(Bi+3)/(Bi+4)
-            Bi = h_w路D_h / (2路k_r)
+    def _single_fin_efficiency(self, h_ref):
+        if self.fin_height_for_eff is not None:
+            m_value = np.sqrt(2.0 * h_ref / max(self.k_wall * self.t_wall, 1e-30))
+            m_l = m_value * self.fin_height_for_eff
+            if m_l < 0.01:
+                return 1.0
+            if m_l > 20.0:
+                return 1.0 / m_l
+            return np.tanh(m_l) / m_l
+        return self.tpms_fin_efficiency(h_ref)
 
-        D_h (TPMS閫氶亾姘村姏鐩村緞) 浣滀负 Dixon鍏紡涓殑绠″唴寰?d_i銆?
-        涓夋。妯″紡浠呴€氳繃TPMS缈呯墖闈㈢Н澧炲己绯绘暟鍖哄垎 (涓庣幇鏈夋ā鍨嬩竴鑷?銆?
+    def _shape_factor_from_uncertainty(self, uncertainty_mode):
+        if uncertainty_mode == 'lower':
+            return 8.0
+        if uncertainty_mode == 'upper':
+            return 4.0
+        return 6.0
 
-        Parameters
-        ----------
-        Re_p : float    棰楃矑Reynolds鏁?
-        Pr : float      Prandtl鏁?
-        k_f : float     娴佷綋瀵肩儹绯绘暟 [W/m路K]
-        mode : str      'lower', 'nominal', 'upper'
-        Nu_w0 : float   鏃犳祦閲忓闈usselt鏁板熀鍊?(榛樿20)
-        T : float, optional  娓╁害 [K]
+    def _apply_area_enhancement(self, h_pure, h_ref_base):
+        # Area gain is treated as a static geometry effect: it uses the
+        # unenhanced wall-side reference HTC and is no longer switched by
+        # wall_from_phi or packed-bed uncertainty mode.
+        eta_fin = self._single_fin_efficiency(h_ref_base)
+        area_factor = 1.0 + self.Afin_Abase * eta_fin
+        h_eff = h_pure * area_factor
+        return h_eff, eta_fin, area_factor
 
-        Returns
-        -------
-        h_i : float     缁煎悎浼犵儹绯绘暟 [W/m虏路K]
-        details : dict  鐑樆鍒嗚В鍙婁腑闂撮噺
-        """
-        enh_lower, enh_nominal, enh_upper, enh_used = self._ht_enhancement_factor(mode, phi_value)
+    def _overall_htc_dixon_impl(self, Re_p, Pr, k_f, uncertainty_mode='nominal',
+                                Nu_w0=20.0, t=None, phi_value=1.0):
+        enh_lower, enh_nominal, enh_upper, enh_used = self._ht_enhancement_factor(
+            uncertainty_mode, phi_value
+        )
 
         h_w_raw, Nu_w_raw = self.wall_htc_dixon(Re_p, Pr, k_f, Nu_w0)
         h_w = h_w_raw * enh_used
         Nu_w = Nu_w_raw * enh_used
-        k_r = self.effective_conductivity_dixon(k_f, Re_p, Pr, T)
+        k_r = self.effective_conductivity_dixon(k_f, Re_p, Pr, t)
 
-        d_i = self.D_h  # hydraulic diameter: for Bi, Nu_w, and R_bed conduction path
+        d_i = self.D_h
         Bi = h_w * d_i / (2.0 * k_r)
         R_w = 1.0 / h_w
         R_bed = (d_i / (6.0 * k_r)) * (Bi + 3.0) / (Bi + 4.0)
-
-        # Pure Dixon HTC referenced to Abase = width 脳 length [W/m虏路K]
         h_pure = 1.0 / (R_w + R_bed)
-
-        # 浣跨敤鍗曟牴缈呯墖鏁堢巼 畏_f (闈?畏_h), 涓?q=Abase*(1+Afin/Abase*畏_f)*h*dt 涓€鑷?
-        if self.fin_height_for_eff is not None:
-            # PlateFin: compute 畏_f directly (tpms_fin_efficiency returns 畏_h for PlateFin)
-            _m  = np.sqrt(2.0 * h_pure / max(self.k_wall * self.t_wall, 1e-30))
-            _mL = _m * self.fin_height_for_eff
-            if _mL < 0.01:
-                eta_fin = 1.0
-            elif _mL > 20.0:
-                eta_fin = 1.0 / _mL
-            else:
-                eta_fin = np.tanh(_mL) / _mL
-        else:
-            # TPMS: tpms_fin_efficiency returns 畏_f directly
-            eta_fin = self.tpms_fin_efficiency(h_pure)
-
-        # q = Abase * (1 + Afin/Abase * eta) * h_pure * dt
-        # h_i returned is the effective HTC still referenced to Abase so that
-        # the caller computes G = h_i * Abase_elem directly.
-        if mode == 'lower':
-            # conservative: no fin contribution
-            h_i = h_pure
-        elif mode == 'nominal':
-            # precise geometry-based fin area
-            h_i = h_pure * (1.0 + self.Afin_Abase * eta_fin)
-        else:  # upper
-            # optimistic: perfect fin efficiency (eta = 1)
-            h_i = h_pure * (1.0 + self.Afin_Abase * 1.0)
-
-        area_factor = h_i / max(h_pure, 1e-30)   # for traceability
+        h_i, eta_fin, area_factor = self._apply_area_enhancement(h_pure, h_w_raw)
 
         details = {
             'htc_model': 'dixon',
+            'wall_htc_source': 'dixon',
+            'bed_conduction_source': 'dixon',
+            'wall_enhancement_scope': 'wall_htc_only',
             'h_w_raw': h_w_raw,
             'h_w': h_w,
             'Nu_w_raw': Nu_w_raw,
             'Nu_w': Nu_w,
-            'k_r_stagnant': self.effective_conductivity_dixon_stagnant(k_f, T),
+            'k_r_stagnant': self.effective_conductivity_dixon_stagnant(k_f, t),
             'k_r': k_r,
             'Bi': Bi,
             'R_wall_film': R_w,
@@ -582,7 +564,7 @@ class PackedBedTPMSModel:
             'eta_fin': eta_fin,
             'area_factor': area_factor,
             'h_eff': h_i,
-            'mode': mode,
+            'mode': uncertainty_mode,
             'D_h_over_d_p': self.N_ratio,
             'phi': float(max(phi_value, 1.0)),
             'enh_lower': enh_lower,
@@ -593,122 +575,55 @@ class PackedBedTPMSModel:
         }
         return h_i, details
 
-    def overall_htc_packed_side(self, Re_p, Pr, k_f, mode='nominal',
-                                htc_model='martin_nilles', T=None,
-                                phi_value=1.0):
-        """
-        濉厖搴婁晶鐨勭患鍚堟湁鏁堜紶鐑郴鏁般€?
-
-        鍙屽尯鍩熸ā鍨? 1/h_eff = 1/h_w + D_h / (C_shape * k_r,eff)
-
-        涓夌妯″紡鎻愪緵涓嶇‘瀹氭€у尯闂?
-        - 'lower':  淇濆畧浼拌 (鏍囧噯鍦嗙, 鏃燭PMS澧炲己)
-        - 'nominal': 鏈€浣充及璁?(TPMS涓瓑澧炲己)
-        - 'upper':  涔愯浼拌 (瀹屽叏TPMS澧炲己)
-
-        Parameters
-        ----------
-        Re_p : float
-            棰楃矑Reynolds鏁?
-        Pr : float
-            Prandtl鏁?
-        k_f : float
-            娴佷綋瀵肩儹绯绘暟 [W/m路K]
-        mode : str
-            'lower', 'nominal', 'upper'
-        htc_model : str
-            'martin_nilles' (榛樿) 鎴?'dixon'
-        T : float, optional
-            娓╁害 [K]
-
-        Returns
-        -------
-        h_eff : float
-            鏈夋晥浼犵儹绯绘暟 [W/m虏路K]
-        details : dict
-            鐑樆鍒嗚В缁嗚妭
-        """
-        mode = str(mode).strip().lower()
-        if mode not in SUPPORTED_PACKED_MODES:
+    def overall_htc_dixon(self, Re_p, Pr, k_f, mode='nominal', Nu_w0=20.0, T=None,
+                          phi_value=1.0):
+        uncertainty_mode = str(mode).strip().lower()
+        if uncertainty_mode not in SUPPORTED_PACKED_MODES:
             raise ValueError(
-                f"Invalid packed mode '{mode}'. Use one of {SUPPORTED_PACKED_MODES}."
+                f"Invalid packed mode '{uncertainty_mode}'. Use one of {SUPPORTED_PACKED_MODES}."
             )
+        return self._overall_htc_dixon_impl(
+            Re_p,
+            Pr,
+            k_f,
+            uncertainty_mode=uncertainty_mode,
+            Nu_w0=Nu_w0,
+            t=T,
+            phi_value=phi_value,
+        )
 
-        # --- Dixon 妯″瀷鍒嗗彂 ---
-        if str(htc_model).strip().lower() == 'dixon':
-            return self.overall_htc_dixon(
-                Re_p, Pr, k_f, mode=mode, T=T, phi_value=phi_value
-            )
-
-        # --- Wang experiment 妯″瀷鍒嗗彂 ---
-        enh_lower, enh_nominal, enh_upper, enh_used = self._ht_enhancement_factor(mode, phi_value)
-        if str(htc_model).strip().lower() == 'wang_experiment':
+    def _overall_htc_martin_like_impl(self, Re_p, Pr, k_f, uncertainty_mode='nominal',
+                                      t=None, phi_value=1.0,
+                                      wall_htc_source='martin_nilles'):
+        enh_lower, enh_nominal, enh_upper, enh_used = self._ht_enhancement_factor(
+            uncertainty_mode, phi_value
+        )
+        if wall_htc_source == 'wang_wall_htc':
             h_w_raw, Nu_w_raw = self.wall_htc_wang_experiment(Re_p, Pr, k_f)
-            k_r_eff = self.effective_conductivity_total(k_f, Re_p, Pr, T)
-            # Continue with Martin-Nilles thermal resistance model
         else:
-            # --- Martin-Nilles 妯″瀷 (榛樿) ---
             h_w_raw, Nu_w_raw = self.wall_htc_packed_bed(Re_p, Pr, k_f)
-            k_r_eff = self.effective_conductivity_total(k_f, Re_p, Pr, T)
 
+        k_r_eff = self.effective_conductivity_total(k_f, Re_p, Pr, t)
         h_w = h_w_raw * enh_used
         Nu_w = Nu_w_raw * enh_used
-
-        # 妯″紡鐩稿叧鍙傛暟
-        # TPMS澧炲己浣撶幇鍦ㄤ袱涓柟闈?
-        # 1. C_shape: 鍑犱綍鍥犲瓙 (TPMS缂╃煭瀵肩儹璺緞 鈫?鏇村皬鐨凜, lower/nominal/upper: 8/6/4)
-        # 2. 缈呯墖闈㈢Н澧炲己: q = Abase*(1 + Afin/Abase*畏_f)*h_pure*dt
-        #    畏_f = tanh(mHf)/(mHf)  (鍗曟牴缈呯墖鏁堢巼, 闈炴暣浣撻潰鏁堢巼畏_h)
-        #    Afin/Abase 鐢卞嚑浣曠簿纭绠? PlateFin=(2Hf-tf)/sf, TPMS=SAD*H
-
-        # 浣跨敤鍗曟牴缈呯墖鏁堢巼 畏_f (闈?畏_h=1-Af/Ah*(1-畏_f))
-        if self.fin_height_for_eff is not None:
-            # PlateFin: compute 畏_f directly from fin geometry
-            _m   = np.sqrt(2.0 * h_w / max(self.k_wall * self.t_wall, 1e-30))
-            _mL  = _m * self.fin_height_for_eff
-            if _mL < 0.01:
-                eta_fin = 1.0
-            elif _mL > 20.0:
-                eta_fin = 1.0 / _mL
-            else:
-                eta_fin = np.tanh(_mL) / _mL
-        else:
-            # TPMS: tpms_fin_efficiency already returns 畏_f for TPMS
-            eta_fin = self.tpms_fin_efficiency(h_w)
-
-        if mode == 'lower':
-            C_shape = 8.0      # 鍦嗙鍑犱綍 (鏈€闀垮鐑矾寰?
-        elif mode == 'nominal':
-            C_shape = 6.0      # TPMS涓棿鍊?
-        else:  # upper
-            C_shape = 4.0      # 鐭鐑矾寰?
-
-        k_r_adj = k_r_eff  # No k_enhance; TPMS flow redistribution captured via C_shape
-
-        # 鐑樆
+        C_shape = self._shape_factor_from_uncertainty(uncertainty_mode)
+        k_r_adj = k_r_eff
         R_wall_film = 1.0 / h_w
         R_bed_cond = self.D_h / (C_shape * k_r_adj)
         R_total = R_wall_film + R_bed_cond
-
-        # Pure HTC referenced to Abase = width 脳 length [W/m虏路K]
         h_pure = 1.0 / R_total
-
-        # q = Abase * (1 + Afin/Abase * eta) * h_pure * dt
-        if mode == 'lower':
-            h_eff = h_pure                                      # conservative: no fin
-        elif mode == 'nominal':
-            h_eff = h_pure * (1.0 + self.Afin_Abase * eta_fin) # precise geometry
-        else:  # upper
-            h_eff = h_pure * (1.0 + self.Afin_Abase * 1.0)    # perfect fin efficiency
-
-        area_factor = h_eff / max(h_pure, 1e-30)   # for traceability
+        h_eff, eta_fin, area_factor = self._apply_area_enhancement(h_pure, h_w_raw)
 
         details = {
+            'htc_model': wall_htc_source,
+            'wall_htc_source': wall_htc_source,
+            'bed_conduction_source': 'martin_nilles',
+            'wall_enhancement_scope': 'wall_htc_only',
             'h_w_raw': h_w_raw,
             'h_w': h_w,
             'Nu_w_raw': Nu_w_raw,
             'Nu_w': Nu_w,
-            'k_eff_stagnant': self.effective_conductivity_stagnant(k_f, T),
+            'k_eff_stagnant': self.effective_conductivity_stagnant(k_f, t),
             'k_r_eff': k_r_eff,
             'k_r_adjusted': k_r_adj,
             'R_wall_film': R_wall_film,
@@ -720,7 +635,7 @@ class PackedBedTPMSModel:
             'area_factor': area_factor,
             'C_shape': C_shape,
             'h_eff': h_eff,
-            'mode': mode,
+            'mode': uncertainty_mode,
             'D_h_over_d_p': self.N_ratio,
             'phi': float(max(phi_value, 1.0)),
             'enh_lower': enh_lower,
@@ -730,6 +645,26 @@ class PackedBedTPMSModel:
             'ht_enhancement_model': self.ht_enhancement_model,
         }
         return h_eff, details
+
+    def overall_htc_packed_side(self, Re_p, Pr, k_f, mode='nominal',
+                                htc_model='martin_nilles', T=None,
+                                phi_value=1.0):
+        uncertainty_mode = str(mode).strip().lower()
+        if uncertainty_mode not in SUPPORTED_PACKED_MODES:
+            raise ValueError(
+                f"Invalid packed mode '{uncertainty_mode}'. Use one of {SUPPORTED_PACKED_MODES}."
+            )
+
+        closure = get_packed_heat_transfer_closure(htc_model)
+        return closure.overall_htc(
+            self,
+            re_p=Re_p,
+            pr=Pr,
+            k_f=k_f,
+            uncertainty_mode=uncertainty_mode,
+            t=T,
+            phi_value=phi_value,
+        )
 
     # ================================================================
     # 5. 鍘嬮檷妯″瀷
@@ -869,28 +804,25 @@ class PackedBedTPMSModel:
 
         Re_p = Re_channel * (self.d_p / self.D_h)
         phi = self.hydraulic_enhancement_phi(tpms_type, Re_channel)
+        htc_model_canonical = normalize_packed_heat_transfer_model(htc_model)
 
         # 浼犵儹
         h_eff, details = self.overall_htc_packed_side(Re_p, Pr, k_f, mode,
-                                                      htc_model=htc_model, T=T,
+                                                      htc_model=htc_model_canonical, T=T,
                                                       phi_value=phi)
 
         # 鍘嬮檷
-        f_base = self.friction_factor_ergun(Re_p)
-        psi = self.tpms_pressure_correction(tpms_type)
-        if self.hydraulic_model == 'phi_re_fit':
-            correction_factor = phi
-        else:
-            correction_factor = psi
-        f_equiv = f_base * correction_factor
+        f_equiv, hydraulic_details = self.hydraulic_closure.compute_friction(
+            self,
+            re_p=Re_p,
+            re_channel=Re_channel,
+            tpms_type=tpms_type,
+            phi_value=phi,
+        )
 
+        details.update(hydraulic_details)
         details['Re_p'] = Re_p
-        details['f_ergun_base'] = f_base
-        details['psi_tpms'] = psi
-        details['phi'] = phi
-        details['hydraulic_model'] = self.hydraulic_model
-        details['correction_factor'] = correction_factor
-        details['f_equiv'] = f_equiv
+        details['htc_model'] = htc_model_canonical
 
         return h_eff, f_equiv, details
 
@@ -969,7 +901,7 @@ def create_packed_bed_model(config, stream_key='hot',
         'k_solid': packed_cfg.get('k_solid', cat.get('k_solid', 10.0)),
         'k_solid_material': packed_cfg.get('k_solid_material', cat.get('k_solid_material', None)),
         'shape_factor': packed_cfg.get('shape_factor', cat.get('shape_factor', 1.0)),
-        'hydraulic_model': packed_cfg.get('hydraulic_model', cat.get('hydraulic_model', 'psi_legacy')),
+        'hydraulic_model': packed_cfg.get('hydraulic_model', cat.get('hydraulic_model', 'ergun_psi_tpms')),
         'phi_source': packed_cfg.get('phi_source', cat.get('phi_source', 'ch3_f_re_fit')),
         'ht_enhancement_model': packed_cfg.get(
             'ht_enhancement_model', cat.get('ht_enhancement_model', 'off')

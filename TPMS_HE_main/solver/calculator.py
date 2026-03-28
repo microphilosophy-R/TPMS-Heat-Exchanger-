@@ -24,6 +24,7 @@ from visualization.plotter import TPMSVisualizer
 from properties.hydrogen_properties import ThermalProperties
 from visualization.convergence import ConvergenceTracker
 from models.packed_bed import SUPPORTED_PACKED_MODES, create_packed_bed_model
+from models.packed_closures import get_kinetics_closure
 from models.plate_fin import plate_fin_fin_efficiency
 
 # Config helpers (extracted to solver/config.py to avoid circular imports)
@@ -115,7 +116,7 @@ class TPMSHeatExchanger:
                 'm': self.config['operating']['mh'],
                 'tpms': self.config['channels']['hot']['structure'],
                 'mode': self.config['channels']['hot']['mode'],
-                'packed_mode': self.config['channels']['hot']['packed']['mode'],
+                'packed_mode': self.config['channels']['hot']['packed']['uncertainty_mode'],
                 'htc_model': self.config['channels']['hot']['packed']['htc_model'],
                 'porosity': por_h,
                 'Ac': W_h * H_h * por_h * n_layers_h,
@@ -127,7 +128,7 @@ class TPMSHeatExchanger:
                 'm': self.config['operating']['mc'],
                 'tpms': self.config['channels']['cold']['structure'],
                 'mode': self.config['channels']['cold']['mode'],
-                'packed_mode': self.config['channels']['cold']['packed']['mode'],
+                'packed_mode': self.config['channels']['cold']['packed']['uncertainty_mode'],
                 'htc_model': self.config['channels']['cold']['packed']['htc_model'],
                 'porosity': por_c,
                 'Ac': W_c * H_c * por_c * n_layers_c,
@@ -223,7 +224,7 @@ class TPMSHeatExchanger:
             self.channel_closure_registry[stream_key] = {
                 'mode': mode,
                 'structure': ch_cfg['structure'],
-                'packed_mode': ch_cfg['packed']['mode'],
+                'packed_mode': ch_cfg['packed']['uncertainty_mode'],
                 'htc_model': ch_cfg['packed']['htc_model'],
                 'packed_model': packed_model,
             }
@@ -704,15 +705,12 @@ class TPMSHeatExchanger:
         xh_calc = self.xh.copy() # Temporary array for calculated profile
         Ac = self.streams['hot']['Ac']
         mh = self.streams['hot']['m']
-        Tc_H2, Pc_H2 = 32.938, 1.284e6
         packed_cfg = self.config.get('channels', {}).get('hot', {}).get('packed', {}) or {}
-        kinetic_model = str(packed_cfg.get('kinetic_model', 'legacy_kw')).strip().lower()
+        kinetic_model = str(
+            packed_cfg.get('kinetic_model', 'wilhelmsen_kw')
+        ).strip().lower()
+        kinetics_closure = get_kinetics_closure(kinetic_model)
         kinetic_params = packed_cfg.get('kinetic_params', {}) or {}
-        Ea = float(kinetic_params.get('Ea_J_per_mol', -336.45))
-        a_k = float(kinetic_params.get('a_m3s_per_mol', 2.2e-3))
-        b_k = float(kinetic_params.get('b_s_inv', -35.11e-3))
-        R_u = 8.314
-        M_H2 = 2.016e-3
 
         for i in range(self.N):
             T = 0.5 * (self.Th[i] + self.Th[i + 1])
@@ -727,6 +725,22 @@ class TPMSHeatExchanger:
                 x_eq = self.h2_props.get_equilibrium_fraction(T)
                 props = self.h2_props.get_properties(T, P, "hydrogen mixture", x)
                 rho = props['rho']
+                rate = kinetics_closure.rate(
+                    t=T,
+                    p=P,
+                    x=x,
+                    x_eq=x_eq,
+                    rho=rho,
+                    params=kinetic_params,
+                )
+                if not np.isfinite(rate):
+                    rate = 0.0
+                rate = np.clip(rate, -10.0, 10.0)
+
+                u = mh / (rho * Ac)
+                xh_calc[i + 1] = np.clip(self.xh[i] + rate * (self.L_elem / u), 0.0, 1.0)
+                self.dx_dt[i] = rate
+                continue
 
                 C_H2 = rho / M_H2
                 if kinetic_model == 'arrhenius_first_order':

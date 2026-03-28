@@ -4,6 +4,25 @@ Integrated Python framework for the design, simulation, and analysis of
 Triply Periodic Minimal Surface (TPMS) heat exchangers in cryogenic
 hydrogen liquefaction applications.
 
+## Latest Progress (2026-03-17)
+
+- Packed-bed closures were refactored into a semantic strategy layer in
+  `models/packed_closures.py` while keeping `PackedBedTPMSModel` as the
+  compatibility entry point used by the solver.
+- Packed configuration now uses canonical names:
+  `uncertainty_mode`, `hydraulic_model`, `htc_model`,
+  `ht_enhancement_model`, and `kinetic_model`.
+  Legacy aliases are still accepted by `normalize_config()`.
+- UI, validation, and config normalization are now aligned with the real
+  backend capabilities. Geometry structure now constrains downstream
+  channel mode and packed submodel choices.
+- Physical semantics were clarified and locked in tests:
+  `ergun_phi_fit` means `Ergun + Chapter 3 phi correction`,
+  `wang_wall_htc` only replaces the wall HTC correlation,
+  and `wall_from_phi` directly affects near-wall HTC rather than directly
+  modifying packed-bed effective conductivity.
+- Full regression status on 2026-03-17: `pytest tests/ -q` -> `56 passed`.
+
 ---
 
 ## Table of Contents
@@ -123,6 +142,8 @@ TPMS_HE/
 |   |   +-- __init__.py
 |   |   +-- plate_fin.py
 |   |   |   plate_fin_fin_efficiency(h, Hf, tf, k_wall, Af_Ah) -> float
+|   |   +-- packed_closures.py
+|   |   |   canonical packed closure registry + geometry/model compatibility rules
 |   |   +-- packed_bed.py
 |   |       class PackedBedTPMSModel
 |   |           .get_htc_and_friction(Re_p, Pr, ...) -> (Nu, f, htc, details)
@@ -188,9 +209,11 @@ TPMS_HE/
 |   |
 |   +-- tests/
 |   |   +-- test_correlations.py   11 assertions
-|   |   +-- test_config.py          8 assertions
+|   |   +-- test_config.py          config aliases + canonical schema checks
 |   |   +-- test_properties.py     12 assertions
-|   |   +-- test_solver.py          9 assertions (runs solver with n_elements=10)
+|   |   +-- test_packed_bed_enhancement.py
+|   |   +-- test_solver.py          solver smoke/regression tests
+|   |   +-- test_structure_compatibility.py
 |   |
 |   +-- app.py              Streamlit entry point (~105 lines)
 |
@@ -239,7 +262,9 @@ Step 1 -- Geometry & Channels
   |                 SmoothPlateFin | PlateFin
   |     surface_area_density [m^-1]  (editable; Geometry Estimator can fill)
   |     packed params: particle_diameter, bed_porosity, k_solid,
-  |                    shape_factor, mode (lower/nominal/upper)
+  |                    shape_factor, uncertainty_mode (lower/nominal/upper),
+  |                    hydraulic_model, htc_model, ht_enhancement_model,
+  |                    kinetic_model
   +-- Channel summary strip (persistent top bar across all steps)
 
 Step 2 -- Operating Conditions
@@ -250,14 +275,16 @@ Step 2 -- Operating Conditions
 
 Step 3 -- Channels  (model selection + live equation display)
   |-- Hot channel card:
-  |     mode selector     -> bare or packed
-  |     structure picker  -> dropdown of SUPPORTED_TPMS_TYPES
+  |     mode selector     -> structure-constrained bare or packed
+  |     compatibility     -> geometry-to-model relation table + constrained dropdowns
   |     [v] Equation expander:
   |         bare mode:    Nu = f(Re, Pr) and f = g(Re) for selected structure
-  |         packed mode:  ZBS/Martin-Nilles HTC + Dixon HTC + Ergun dP
-  |                       with per-structure psi correction factors
+  |         packed mode:  Martin-Nilles / Dixon / Wang wall HTC options
+  |                       + Ergun-based hydraulic closures
+  |                       + optional wall-only phi enhancement
+  |                       + kinetic model selector
   |-- Cold channel card: identical layout
-  +-- Switching mode/structure updates the equation display live
+  +-- Switching structure updates allowed packed submodels live
 
 Step 4 -- Solver Settings
   |-- n_elements, max_iter, tolerance
@@ -313,16 +340,38 @@ CoolProp-backed fluid property engine with ortho-para H2 correction.
 
 ### `PackedBedTPMSModel`  (models/)
 
-Two-level closure for packed-bed TPMS channels.
+Compatibility entry point for packed-bed TPMS channels. Internally it now
+delegates packed semantics to the canonical strategy registry in
+`models/packed_closures.py`.
 
 | Method | Signature | Description |
 |---|---|---|
-| `get_htc_and_friction` | `(Re_p, Pr, d_p, eps_bed, k_s, psi, mode, htc_model, ...) -> (Nu, f, htc, details)` | Primary closure |
+| `get_htc_and_friction` | `(Re_p, Pr, d_p, eps_bed, k_s, uncertainty_mode, htc_model, hydraulic_model, ht_enhancement_model, kinetic_model, ...) -> (Nu, f, htc, details)` | Primary compatibility closure |
 | `interval_estimate` | `(Re_p, ...) -> (lower, nominal, upper)` | Bracketed HTC uncertainty band |
 | `overall_htc_packed_side` | `(Re_p, ...) -> h_eff` | Effective HTC including TPMS fin enhancement |
-| `friction_factor_ergun` | `(Re_p, eps_bed, psi) -> f_eq` | Modified Ergun friction factor |
+| `friction_factor_ergun` | `(Re_p, eps_bed, psi) -> f_eq` | Ergun-base friction factor |
 
-`mode` in `('lower', 'nominal', 'upper')`.
+Canonical packed uncertainty selector:
+`uncertainty_mode in ('lower', 'nominal', 'upper')`.
+
+### `packed_closures`  (models/)
+
+Canonical packed-bed model semantics and geometry compatibility registry.
+
+| Interface | Canonical options | Notes |
+|---|---|---|
+| `hydraulic_model` | `ergun_psi_tpms`, `ergun_phi_fit` | `ergun_phi_fit` means Ergun base friction multiplied by the Chapter 3 phi fit |
+| `htc_model` | `martin_nilles`, `dixon`, `wang_wall_htc` | `wang_wall_htc` only swaps the wall HTC correlation |
+| `ht_enhancement_model` | `off`, `wall_from_phi` | `wall_from_phi` directly modifies wall HTC / Nu only |
+| `kinetic_model` | `wilhelmsen_kw`, `arrhenius_first_order` | Only active for hot + packed + hydrogen mixture channels |
+
+Geometry compatibility helpers:
+`get_allowed_channel_modes()`,
+`get_allowed_hydraulic_models()`,
+`get_allowed_packed_heat_transfer_models()`,
+`get_allowed_wall_enhancement_models()`,
+`get_allowed_kinetic_models()`,
+and `get_structure_compatibility()`.
 
 ### `TPMSHeatExchanger`  (solver/)
 
@@ -426,8 +475,13 @@ config = {
                 "bed_porosity":      0.40,
                 "k_solid":           10.0,   # [W/(m K)]
                 "shape_factor":      1.0,
-                "mode":              "nominal",       # "lower"|"nominal"|"upper"
-                "htc_model":         "martin_nilles", # "martin_nilles"|"dixon"
+                "uncertainty_mode":  "nominal",       # "lower"|"nominal"|"upper"
+                "hydraulic_model":   "ergun_psi_tpms",   # or "ergun_phi_fit"
+                "htc_model":         "martin_nilles",    # or "dixon"|"wang_wall_htc"
+                "ht_enhancement_model": "off",           # or "wall_from_phi"
+                "kinetic_model":     "wilhelmsen_kw",   # or "arrhenius_first_order"
+                "phi_source":        "ch3_f_re_fit",
+                "ht_nominal_rule":   "geometric",
             },
         },
         "cold": { ... },   # same structure
@@ -450,6 +504,16 @@ config = {
     },
 }
 ```
+
+Notes:
+
+- `normalize_config()` still accepts legacy aliases such as `packed.mode`,
+  `phi_re_fit`, `wang_experiment`, `from_phi`, and `legacy_kw`, but writes
+  them back as canonical names.
+- Geometry now constrains packed choices. Example:
+  `SmoothPlateFin -> bare only`;
+  `PlateFin -> wang_wall_htc allowed`;
+  `Primitive/Neovius/FRD/FKS -> no phi-based hydraulic or wall enhancement`.
 
 Key geometric formulas:
 
@@ -569,7 +633,7 @@ python -m analysis.comparison
 ```bash
 cd TPMS_HE_main
 python -m pytest tests/ -v
-# 40 tests, <10 seconds
+# 56 tests, about 10 seconds on the current local environment
 ```
 
 ---

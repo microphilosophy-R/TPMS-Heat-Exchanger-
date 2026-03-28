@@ -10,6 +10,7 @@ Run from TPMS_HE_main/:
 import numpy as np
 import pytest
 
+from models.packed_closures import ArrheniusFirstOrderKineticsClosure
 from solver.calculator import TPMSHeatExchanger
 from solver.config import create_default_config, create_cpfhx_config
 
@@ -110,8 +111,8 @@ def test_arrhenius_kinetics_mode_smoke():
     cfg = _fast_config(create_default_config(), n_elements=6)
     cfg["channels"]["hot"]["mode"] = "packed"
     cfg["channels"]["hot"]["packed"]["kinetic_model"] = "arrhenius_first_order"
-    cfg["channels"]["hot"]["packed"]["hydraulic_model"] = "phi_re_fit"
-    cfg["channels"]["hot"]["packed"]["ht_enhancement_model"] = "from_phi"
+    cfg["channels"]["hot"]["packed"]["hydraulic_model"] = "ergun_phi_fit"
+    cfg["channels"]["hot"]["packed"]["ht_enhancement_model"] = "wall_from_phi"
 
     hx = TPMSHeatExchanger(cfg)
     hx._update_stream_physics("hot")
@@ -120,3 +121,23 @@ def test_arrhenius_kinetics_mode_smoke():
 
     assert np.all(np.isfinite(hx.dx_dt))
     assert np.all(hx.xh >= 0.0) and np.all(hx.xh <= 1.0)
+
+
+def test_arrhenius_kinetics_relaxes_toward_equilibrium():
+    closure = ArrheniusFirstOrderKineticsClosure()
+    kwargs = {
+        "t": 60.0,
+        "p": 2.0e6,
+        "x_eq": 0.72,
+        "rho": 8.0,
+        "params": {},
+    }
+
+    rate_far = closure.rate(x=0.45, **kwargs)
+    rate_near = closure.rate(x=0.70, **kwargs)
+    rate_above = closure.rate(x=0.80, **kwargs)
+
+    assert rate_far > 0.0
+    assert rate_near > 0.0
+    assert rate_far > rate_near
+    assert rate_above < 0.0

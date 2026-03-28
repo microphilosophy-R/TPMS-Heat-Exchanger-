@@ -10,7 +10,22 @@ import streamlit as st
 
 from solver.config import create_default_config, create_cpfhx_config
 from correlations.thermohydraulic_correlations import ThermoHydraulicCorrelations
-from models.packed_bed import SUPPORTED_PACKED_MODES
+from models.packed_closures import (
+    SUPPORTED_PACKED_MODES,
+    SUPPORTED_HYDRAULIC_MODELS,
+    SUPPORTED_PACKED_HEAT_TRANSFER_MODELS,
+    SUPPORTED_WALL_ENHANCEMENT_MODELS,
+    SUPPORTED_KINETIC_MODELS,
+    get_allowed_channel_modes,
+    get_allowed_hydraulic_models,
+    get_allowed_packed_heat_transfer_models,
+    get_allowed_wall_enhancement_models,
+    get_allowed_kinetic_models,
+    normalize_hydraulic_model,
+    normalize_packed_heat_transfer_model,
+    normalize_wall_enhancement_model,
+    normalize_kinetic_model,
+)
 
 APP_DIR = Path(__file__).resolve().parent.parent
 AUTOSAVE_PATH = APP_DIR / ".streamlit" / "tpms_ui_state.json"
@@ -92,6 +107,10 @@ def sanitize_ui_state(state, defaults):
     supported_tpms = set(ThermoHydraulicCorrelations.get_supported_tpms_types())
     supported_modes = {"bare", "packed"}
     supported_packed_modes = set(SUPPORTED_PACKED_MODES)
+    supported_hydraulic = set(SUPPORTED_HYDRAULIC_MODELS)
+    supported_htc = set(SUPPORTED_PACKED_HEAT_TRANSFER_MODELS)
+    supported_enhancement = set(SUPPORTED_WALL_ENHANCEMENT_MODELS)
+    supported_kinetics = set(SUPPORTED_KINETIC_MODELS)
 
     for ch in ("hot", "cold"):
         ch_cfg = merged["channels"][ch]
@@ -101,9 +120,88 @@ def sanitize_ui_state(state, defaults):
         if ch_cfg["structure"] not in supported_tpms:
             ch_cfg["structure"] = defaults["channels"][ch]["structure"]
             notices.append(f"{ch} TPMS structure reset to default.")
-        if ch_cfg["packed"]["mode"] not in supported_packed_modes:
-            ch_cfg["packed"]["mode"] = defaults["channels"][ch]["packed"]["mode"]
-            notices.append(f"{ch} packed mode reset to default.")
+        allowed_modes = get_allowed_channel_modes(ch_cfg["structure"])
+        if ch_cfg["mode"] not in allowed_modes:
+            ch_cfg["mode"] = allowed_modes[0]
+            notices.append(
+                f"{ch} channel mode adjusted for structure {ch_cfg['structure']}."
+            )
+        packed_cfg = ch_cfg["packed"]
+        if "uncertainty_mode" not in packed_cfg and "mode" in packed_cfg:
+            packed_cfg["uncertainty_mode"] = packed_cfg["mode"]
+            notices.append(f"{ch} packed.mode migrated to packed.uncertainty_mode.")
+        packed_cfg.pop("mode", None)
+        if packed_cfg.get("uncertainty_mode") not in supported_packed_modes:
+            packed_cfg["uncertainty_mode"] = defaults["channels"][ch]["packed"]["uncertainty_mode"]
+            notices.append(f"{ch} packed uncertainty mode reset to default.")
+
+        allowed_hydraulic = set(get_allowed_hydraulic_models(ch_cfg["structure"]))
+        allowed_htc_models = set(get_allowed_packed_heat_transfer_models(ch_cfg["structure"]))
+        allowed_enhancement = set(get_allowed_wall_enhancement_models(ch_cfg["structure"]))
+        allowed_kinetics = set(get_allowed_kinetic_models(ch_cfg["structure"]))
+
+        try:
+            packed_cfg["hydraulic_model"] = normalize_hydraulic_model(
+                packed_cfg.get("hydraulic_model", defaults["channels"][ch]["packed"]["hydraulic_model"])
+            )
+        except ValueError:
+            packed_cfg["hydraulic_model"] = defaults["channels"][ch]["packed"]["hydraulic_model"]
+            notices.append(f"{ch} hydraulic model reset to default.")
+        if packed_cfg["hydraulic_model"] not in supported_hydraulic or (
+            allowed_hydraulic and packed_cfg["hydraulic_model"] not in allowed_hydraulic
+        ):
+            packed_cfg["hydraulic_model"] = defaults["channels"][ch]["packed"]["hydraulic_model"]
+            if allowed_hydraulic and packed_cfg["hydraulic_model"] not in allowed_hydraulic:
+                packed_cfg["hydraulic_model"] = next(iter(allowed_hydraulic))
+                notices.append(f"{ch} hydraulic model adjusted for structure {ch_cfg['structure']}.")
+
+        try:
+            packed_cfg["htc_model"] = normalize_packed_heat_transfer_model(
+                packed_cfg.get("htc_model", defaults["channels"][ch]["packed"]["htc_model"])
+            )
+        except ValueError:
+            packed_cfg["htc_model"] = defaults["channels"][ch]["packed"]["htc_model"]
+            notices.append(f"{ch} HTC model reset to default.")
+        if packed_cfg["htc_model"] not in supported_htc or (
+            allowed_htc_models and packed_cfg["htc_model"] not in allowed_htc_models
+        ):
+            packed_cfg["htc_model"] = defaults["channels"][ch]["packed"]["htc_model"]
+            if allowed_htc_models and packed_cfg["htc_model"] not in allowed_htc_models:
+                packed_cfg["htc_model"] = next(iter(allowed_htc_models))
+                notices.append(f"{ch} HTC model adjusted for structure {ch_cfg['structure']}.")
+
+        try:
+            packed_cfg["ht_enhancement_model"] = normalize_wall_enhancement_model(
+                packed_cfg.get(
+                    "ht_enhancement_model",
+                    defaults["channels"][ch]["packed"]["ht_enhancement_model"],
+                )
+            )
+        except ValueError:
+            packed_cfg["ht_enhancement_model"] = defaults["channels"][ch]["packed"]["ht_enhancement_model"]
+            notices.append(f"{ch} wall enhancement model reset to default.")
+        if packed_cfg["ht_enhancement_model"] not in supported_enhancement or (
+            allowed_enhancement and packed_cfg["ht_enhancement_model"] not in allowed_enhancement
+        ):
+            packed_cfg["ht_enhancement_model"] = defaults["channels"][ch]["packed"]["ht_enhancement_model"]
+            if allowed_enhancement and packed_cfg["ht_enhancement_model"] not in allowed_enhancement:
+                packed_cfg["ht_enhancement_model"] = next(iter(allowed_enhancement))
+                notices.append(f"{ch} wall enhancement adjusted for structure {ch_cfg['structure']}.")
+
+        try:
+            packed_cfg["kinetic_model"] = normalize_kinetic_model(
+                packed_cfg.get("kinetic_model", defaults["channels"][ch]["packed"]["kinetic_model"])
+            )
+        except ValueError:
+            packed_cfg["kinetic_model"] = defaults["channels"][ch]["packed"]["kinetic_model"]
+            notices.append(f"{ch} kinetic model reset to default.")
+        if packed_cfg["kinetic_model"] not in supported_kinetics or (
+            allowed_kinetics and packed_cfg["kinetic_model"] not in allowed_kinetics
+        ):
+            packed_cfg["kinetic_model"] = defaults["channels"][ch]["packed"]["kinetic_model"]
+            if allowed_kinetics and packed_cfg["kinetic_model"] not in allowed_kinetics:
+                packed_cfg["kinetic_model"] = next(iter(allowed_kinetics))
+                notices.append(f"{ch} kinetic model adjusted for structure {ch_cfg['structure']}.")
 
     return merged, notices
 

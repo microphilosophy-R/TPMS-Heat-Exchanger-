@@ -1,6 +1,16 @@
 ﻿import pandas as pd
 from matplotlib import pyplot as plt
 
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[4]
+ANALYSIS_DIR = ROOT / "code" / "analysis"
+if str(ANALYSIS_DIR) not in sys.path:
+    sys.path.append(str(ANALYSIS_DIR))
+
+from figure_localization import save_figure_with_chinese_version
+
 
 class ConvergenceTracker:
     """Tracks solution convergence history and generates diagnostics."""
@@ -27,8 +37,8 @@ class ConvergenceTracker:
         Apply rigorous academic formatting to matplotlib
         """
         plt.rcdefaults()
-        plt.rcParams['font.family'] = 'serif'
-        plt.rcParams['font.serif'] = ['Times New Roman']
+        plt.rcParams['font.family'] = ['Times New Roman', 'SimSun']
+        plt.rcParams['font.serif'] = ['Times New Roman', 'SimSun']
         plt.rcParams['mathtext.fontset'] = 'stix'
 
         plt.rcParams['font.size'] = 14
@@ -124,7 +134,7 @@ class ConvergenceTracker:
         ax.grid(True)
 
         plt.tight_layout()
-        plt.savefig(save_path, dpi=150)
+        save_figure_with_chinese_version(fig, Path(save_path), dpi=150, bbox_inches=None)
         plt.close()
         print(f"[OK] Convergence plot saved to {save_path}")
 

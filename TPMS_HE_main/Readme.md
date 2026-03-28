@@ -2,6 +2,20 @@
 
 Integrated TPMS heat-exchanger solver package (Stage-1 + Stage-2 merged).
 
+## Latest Progress (2026-03-17)
+
+- Packed-bed backend now uses a canonical strategy layer in
+  `models/packed_closures.py`.
+- Canonical packed config fields are:
+  `uncertainty_mode`, `hydraulic_model`, `htc_model`,
+  `ht_enhancement_model`, and `kinetic_model`.
+- Geometry structure now constrains downstream channel and packed submodel
+  choices in UI, validation, and `normalize_config()`.
+- `wang_wall_htc` means wall HTC only; bed conduction still follows the
+  Martin-Nilles framework.
+- `ergun_phi_fit` means Ergun base friction with Chapter 3 phi correction,
+  not an independent experimental pressure-drop law.
+
 ## What Is Included
 
 - `tpms_thermo_hydraulic_calculator.py`: main coupled solver
@@ -34,11 +48,18 @@ config["channels"]["hot"]["packed"] = {
     "bed_porosity": 0.40,
     "k_solid": 10.0,
     "shape_factor": 1.0,
-    "mode": "nominal",  # lower / nominal / upper
+    "uncertainty_mode": "nominal",   # lower / nominal / upper
+    "hydraulic_model": "ergun_psi_tpms",
+    "htc_model": "martin_nilles",
+    "ht_enhancement_model": "off",
+    "kinetic_model": "wilhelmsen_kw",
 }
 ```
 
 The same schema applies to `channels["cold"]`.
+
+Legacy aliases such as `mode`, `phi_re_fit`, `wang_experiment`,
+`from_phi`, and `legacy_kw` are still accepted and normalized.
 
 ## Ortho-Para Conversion Rule
 
@@ -84,7 +105,8 @@ python -m streamlit run app.py
 ## Streamlit Wizard Highlights
 
 - step-by-step setup (Geometry -> Operating -> Channels -> Solver -> Output -> Confirm)
-- explicit hot/cold mode + TPMS structure selectors
+- geometry-to-model compatibility table in the Channels step
+- structure-constrained hot/cold mode + packed submodel selectors
 - autosave file: `.streamlit/tpms_ui_state.json`
 - strict validation gate before run
 
